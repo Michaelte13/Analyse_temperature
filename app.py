@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sat Aug  1 10:10:54 2026
-
-@author: m.petit
+Application Streamlit d'Audit Énergétique & Qualité de l'Air Intérieur (QAI)
+Analyses Automatisées & Filtres par Taux et Variations
 """
 
 from datetime import datetime, timedelta
@@ -16,11 +15,13 @@ import streamlit as st
 # CONFIGURATION DE LA PAGE STREAMLIT
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Audit Énergétique & QAI", page_icon="📊", layout="wide"
+    page_title="Audit Énergétique & QAI - Analyses Automatisées",
+    page_icon="⚡",
+    layout="wide",
 )
 
 # -----------------------------------------------------------------------------
-# 1. FONCTIONS DE TRAITEMENT ET CHARGEMENT DES ONGLETS EXCEL
+# 1. NETTOYAGE ET CHARGEMENT DES DONNÉES
 # -----------------------------------------------------------------------------
 
 
@@ -54,7 +55,6 @@ def process_custom_dataframe(df):
     for col in list(df.columns):
         if col != "Horodatage":
             if str(col).lower().strip() == "eau":
-                # Traitement spécial colonne Eau ("31,5 - 31,2")
                 if df[col].dtype == object or str(df[col].dtype) == "string":
                     split_eau = df[col].astype(str).str.split("-", expand=True)
                     if split_eau.shape[1] >= 2:
@@ -78,7 +78,7 @@ def process_custom_dataframe(df):
                 else:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Renommage explicite de la température extérieure si présente
+    # Renommage explicite de la température extérieure
     col_mapping = {}
     for col in df.columns:
         col_lower = str(col).lower().strip()
@@ -87,7 +87,7 @@ def process_custom_dataframe(df):
 
     df = df.rename(columns=col_mapping)
 
-    # Suppression des colonnes entièrement vides
+    # Conservation des colonnes non vides
     cols_a_garder = ["Horodatage"] + [
         c
         for c in df.columns
@@ -106,13 +106,10 @@ def load_data(uploaded_file):
     }
 
     if uploaded_file.name.endswith(".csv"):
-        # Si fichier CSV unique
         df_csv = pd.read_csv(uploaded_file, sep=None, engine="python")
-        df_clean = process_custom_dataframe(df_csv)
-        data_dict["Température"] = df_clean
+        data_dict["Température"] = process_custom_dataframe(df_csv)
         return data_dict
 
-    # Fichier Excel multi-onglets
     xls = pd.ExcelFile(uploaded_file)
     sheets_dict = pd.read_excel(xls, sheet_name=None)
 
@@ -141,7 +138,6 @@ def generate_synthetic_data():
     ]
     salles = ["Nord", "Est", "Sud", "Aux 1", "Aux 2"]
 
-    # 1. Température
     df_t = pd.DataFrame({"Date FR": dates})
     t_ext_vals = (
         5
@@ -163,7 +159,6 @@ def generate_synthetic_data():
         for d, r in zip(t_dep, t_ret)
     ]
 
-    # 2. Humidité
     df_h = pd.DataFrame({"Date FR": dates})
     df_h["Ext."] = [
         f"{v:.1f}".replace(".", ",")
@@ -181,7 +176,6 @@ def generate_synthetic_data():
         )
         df_h[s] = [f"{v:.1f}".replace(".", ",") for v in v_h]
 
-    # 3. CO2
     df_c = pd.DataFrame({"Date FR": dates})
     for s in salles:
         v_c = np.where(
@@ -191,7 +185,6 @@ def generate_synthetic_data():
         ) + np.random.normal(0, 25, len(df_c))
         df_c[s] = [f"{int(max(400, v))}" for v in v_c]
 
-    # 4. COV
     df_v = pd.DataFrame({"Date FR": dates})
     for s in salles:
         v_v = np.where(
@@ -210,10 +203,10 @@ def generate_synthetic_data():
 
 
 # -----------------------------------------------------------------------------
-# 2. BARRE LATÉRALE (SIDEBAR) & FILTRES
+# 2. BARRE LATÉRALE : FILTRES ET CURSEURS D'ANALYSE
 # -----------------------------------------------------------------------------
 
-st.sidebar.title("🛠️ Configuration Audit")
+st.sidebar.title("🛠️ Paramètres & Curseurs")
 
 uploaded_file = st.sidebar.file_uploader(
     "Fichier de mesures (Excel multi-onglets)", type=["xlsx", "xls", "csv"]
@@ -221,12 +214,12 @@ uploaded_file = st.sidebar.file_uploader(
 
 if uploaded_file is not None:
     data_dict = load_data(uploaded_file)
-    st.sidebar.success("Fichier Excel chargé avec succès !")
+    st.sidebar.success("Fichier chargé avec succès !")
 else:
-    st.sidebar.info("Aucun fichier importé. Utilisation des données de démo.")
+    st.sidebar.info("Utilisation des données de démo.")
     data_dict = generate_synthetic_data()
 
-# Recherche des dates min et max globales sur l'ensemble des DataFrames
+# Extraction des bornes temporelles
 all_min_dates = []
 all_max_dates = []
 
@@ -238,9 +231,7 @@ for key, df_sheet in data_dict.items():
             all_max_dates.append(valid_dates.max().date())
 
 if not all_min_dates:
-    st.error(
-        "❌ Aucune date valide n'a été trouvée dans le fichier Excel. Vérifiez le format de vos colonnes de dates."
-    )
+    st.error("❌ Aucune date valide trouvée.")
     st.stop()
 
 global_min_date = min(all_min_dates)
@@ -253,37 +244,65 @@ date_range = st.sidebar.date_input(
     max_value=global_max_date,
 )
 
-# Application du filtre temporel à chacun des onglets
+# Filtre Heures d'occupation
+st.sidebar.markdown("---")
+st.sidebar.subheader("🕒 Horaires d'Occupation")
+filtre_occupation = st.sidebar.checkbox(
+    "Filtrer uniquement pendant l'occupation (08h - 18h)", value=False
+)
+
+# Application des filtres de date et d'heure
 if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_filter, end_filter = date_range
     for key in data_dict:
         if not data_dict[key].empty and "Horodatage" in data_dict[key].columns:
             df_curr = data_dict[key]
-            data_dict[key] = df_curr[
-                (df_curr["Horodatage"].dt.date >= start_filter)
-                & (df_curr["Horodatage"].dt.date <= end_filter)
-            ]
+            cond = (df_curr["Horodatage"].dt.date >= start_filter) & (
+                df_curr["Horodatage"].dt.date <= end_filter
+            )
+            if filtre_occupation:
+                cond = cond & (df_curr["Horodatage"].dt.hour.between(8, 18))
+            data_dict[key] = df_curr[cond]
 
-# Paramétrage des seuils dans la barre latérale
-st.sidebar.subheader("🎯 Seuils d'alerte & Confort")
-t_min_confort = st.sidebar.number_input(
-    "Température Min Confort (°C)", value=19.0, step=0.5
-)
-t_max_confort = st.sidebar.number_input(
-    "Température Max Confort (°C)", value=22.0, step=0.5
-)
-hr_min_confort = st.sidebar.number_input(
-    "Humidité Min Confort (%)", value=40, step=5
-)
-hr_max_confort = st.sidebar.number_input(
-    "Humidité Max Confort (%)", value=60, step=5
-)
-seuil_co2 = st.sidebar.number_input("Seuil CO2 max (ppm)", value=1000, step=50)
-seuil_cov = st.sidebar.number_input("Seuil COV max (ppb)", value=200, step=20)
+# --- CURSEURS POUR L'ANALYSE ET SEUILS ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎛️ Curseurs & Seuils d'Analyse")
+
+# Température
+with st.sidebar.expander("🌡️ Température & Chutes", expanded=True):
+    t_min_confort = st.slider(
+        "T° Min Confort (°C)", 16.0, 22.0, 19.0, step=0.5
+    )
+    t_max_confort = st.slider(
+        "T° Max Confort (°C)", 20.0, 26.0, 22.0, step=0.5
+    )
+    seuil_chute_temp = st.slider(
+        "Chute rapide de T° (°C / heure)", 0.5, 4.0, 1.5, step=0.1
+    )
+
+# Humidité
+with st.sidebar.expander("💧 Humidité & Variations", expanded=False):
+    hr_min_confort = st.slider("Humidité Min (%)", 20, 50, 40, step=5)
+    hr_max_confort = st.slider("Humidité Max (%)", 50, 80, 60, step=5)
+    seuil_choc_hum = st.slider(
+        "Variation rapide d'Humidité (% / 1h)", 5, 25, 10, step=1
+    )
+
+# Qualité de l'air (CO2 & COV)
+with st.sidebar.expander("🟢 CO2 & 🧪 COV", expanded=False):
+    seuil_co2 = st.slider("Seuil Alerte CO2 (ppm)", 800, 2000, 1000, step=50)
+    seuil_cov = st.slider("Seuil Alerte COV (ppb)", 100, 500, 200, step=10)
+    seuil_pic_percent = st.slider(
+        "Seuil de Pic de Pollution (% au-dessus de la moy.)",
+        20,
+        200,
+        50,
+        step=10,
+    )
 
 
 # -----------------------------------------------------------------------------
-# 3. EXTRACTION ET CALCULS DES KPIS
+# 3. EXTRACTION DES DONNÉES ET DÉTECTION DES ANOMALIES
 # -----------------------------------------------------------------------------
 
 df_temp = data_dict.get("Température", pd.DataFrame())
@@ -291,7 +310,7 @@ df_hum = data_dict.get("Humidité", pd.DataFrame())
 df_co2 = data_dict.get("CO2", pd.DataFrame())
 df_cov = data_dict.get("COV", pd.DataFrame())
 
-# Helper pour récupérer les colonnes des zones (salles)
+
 def get_room_cols(df, extra_excl=None):
     if df.empty:
         return []
@@ -306,70 +325,116 @@ salles_hum = get_room_cols(df_hum)
 salles_co2 = get_room_cols(df_co2)
 salles_cov = get_room_cols(df_cov)
 
-avg_temp = (
-    df_temp[salles_temp].mean().mean()
-    if not df_temp.empty and salles_temp
-    else None
-)
-avg_hum = (
-    df_hum[salles_hum].mean().mean()
-    if not df_hum.empty and salles_hum
-    else None
-)
-max_co2 = (
-    df_co2[salles_co2].max().max() if not df_co2.empty and salles_co2 else None
-)
-max_cov = (
-    df_cov[salles_cov].max().max() if not df_cov.empty and salles_cov else None
-)
+# --- CALCUL DES ANOMALIES AUTOMATIQUES ---
+chutes_temp_detectees = []
+if not df_temp.empty and salles_temp:
+    for s in salles_temp:
+        # Différence sur 1h (4 pas de 15 min)
+        diff_1h = df_temp[s].diff(4)
+        nb_chutes = (diff_1h <= -seuil_chute_temp).sum()
+        if nb_chutes > 0:
+            chutes_temp_detectees.append((s, nb_chutes))
+
+pct_co2_depasse = 0
+if not df_co2.empty and salles_co2:
+    vals_co2 = df_co2[salles_co2].values.flatten()
+    vals_co2 = vals_co2[~np.isnan(vals_co2)]
+    if len(vals_co2) > 0:
+        pct_co2_depasse = (vals_co2 > seuil_co2).mean() * 100
+
+pct_cov_depasse = 0
+if not df_cov.empty and salles_cov:
+    vals_cov = df_cov[salles_cov].values.flatten()
+    vals_cov = vals_cov[~np.isnan(vals_cov)]
+    if len(vals_cov) > 0:
+        pct_cov_depasse = (vals_cov > seuil_cov).mean() * 100
 
 
 # -----------------------------------------------------------------------------
-# 4. DASHBOARD PRINCIPAL (STRUCTURE EN 4 ONGLETS)
+# 4. EN-TÊTE ET DIAGNOSTIC AUTOMATIQUE D'ALERTE
 # -----------------------------------------------------------------------------
 
-st.title("🏛️ Tableau de Bord - Audit Énergétique & QAI")
-st.markdown("Analyse multi-onglets : Température, Humidité, CO2 et COV")
+st.title("⚡ Audit Énergétique & QAI — Diagnostic Automatisé")
 
-# KPIs synthétiques
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric(
-    "Température Intérieure Moy.",
-    f"{avg_temp:.1f} °C" if avg_temp is not None else "N/A",
-)
-kpi2.metric(
-    "Humidité Relative Moy.",
-    f"{avg_hum:.1f} %" if avg_hum is not None else "N/A",
-)
-kpi3.metric(
-    "Pic CO2 Max",
-    f"{int(max_co2)} ppm" if max_co2 is not None else "N/A",
-)
-kpi4.metric(
-    "Pic COV Max",
-    f"{int(max_cov)} ppb" if max_cov is not None else "N/A",
-)
+# Bandeau de synthèse automatique
+with st.container():
+    st.subheader("🚨 Synthèse Automatique des Anomalies & Taux")
+    col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+
+    # 1. Chutes de Température
+    total_chutes = sum(count for _, count in chutes_temp_detectees)
+    if total_chutes > 0:
+        col_a1.metric(
+            "Chutes de T° Brutales",
+            f"{total_chutes} évènements",
+            delta=f"📉 > {seuil_chute_temp}°C/h",
+            delta_color="inverse",
+        )
+    else:
+        col_a1.metric(
+            "Chutes de T° Brutales",
+            "0 détectée",
+            delta="✅ Stable",
+            delta_color="normal",
+        )
+
+    # 2. Taux d'inconfort Thermique
+    if not df_temp.empty and salles_temp:
+        vals_t = df_temp[salles_temp].values.flatten()
+        vals_t = vals_t[~np.isnan(vals_t)]
+        pct_inconfort_t = (
+            ((vals_t < t_min_confort) | (vals_t > t_max_confort)).mean() * 100
+            if len(vals_t) > 0
+            else 0
+        )
+        col_a2.metric(
+            "Inconfort Thermique",
+            f"{pct_inconfort_t:.1f} % du temps",
+            delta=f"Plage: {t_min_confort}-{t_max_confort}°C",
+            delta_color="inverse" if pct_inconfort_t > 15 else "normal",
+        )
+    else:
+        col_a2.metric("Inconfort Thermique", "N/A")
+
+    # 3. Taux d'inconfort CO2
+    col_a3.metric(
+        "Dépassement CO2",
+        f"{pct_co2_depasse:.1f} % du temps",
+        delta=f"> {seuil_co2} ppm",
+        delta_color="inverse" if pct_co2_depasse > 10 else "normal",
+    )
+
+    # 4. Taux d'inconfort COV
+    col_a4.metric(
+        "Dépassement COV",
+        f"{pct_cov_depasse:.1f} % du temps",
+        delta=f"> {seuil_cov} ppb",
+        delta_color="inverse" if pct_cov_depasse > 10 else "normal",
+    )
 
 st.divider()
 
+# -----------------------------------------------------------------------------
+# 5. ONGLETS DE DÉTAIL DES ANALYSES
+# -----------------------------------------------------------------------------
+
 tab_t, tab_h, tab_c, tab_v = st.tabs(
     [
-        "🌡️ 1. Température",
-        "💧 2. Humidité",
-        "🟢 3. CO2",
-        "🧪 4. COV",
+        "🌡️ 1. Température & Chutes",
+        "💧 2. Humidité & Chocs",
+        "🟢 3. Confinement CO2",
+        "🧪 4. Pollution COV",
     ]
 )
 
-
 # =============================================================================
-# ONGLET 1 : TEMPÉRATURE
+# ONGLET 1 : TEMPÉRATURE & CHUTES RAPIDES
 # =============================================================================
 with tab_t:
-    st.subheader("Analyse Thermique (Onglet 'Température')")
+    st.subheader("📊 Analyse Thermique & Détection des Pertes de Chaleur")
 
-    if not df_temp.empty:
-        # Superposition des signaux principaux
+    if not df_temp.empty and salles_temp:
+        # Visualisation principale
         fig_temp = go.Figure()
 
         if "T_ext" in df_temp.columns:
@@ -378,7 +443,7 @@ with tab_t:
                     x=df_temp["Horodatage"],
                     y=df_temp["T_ext"],
                     name="T° Extérieure",
-                    line=dict(color="blue", dash="dash"),
+                    line=dict(color="#3498db", dash="dash"),
                 )
             )
 
@@ -387,111 +452,104 @@ with tab_t:
                 go.Scatter(
                     x=df_temp["Horodatage"],
                     y=df_temp["V3V_Depart"],
-                    name="Départ V3V (Eau)",
-                    line=dict(color="red"),
+                    name="Départ Eau V3V",
+                    line=dict(color="#e74c3c"),
                 )
             )
 
-        if "T_Retour" in df_temp.columns:
+        for s in salles_temp:
             fig_temp.add_trace(
                 go.Scatter(
                     x=df_temp["Horodatage"],
-                    y=df_temp["T_Retour"],
-                    name="Retour Chaufferie",
-                    line=dict(color="darkred", dash="dot"),
+                    y=df_temp[s],
+                    name=f"Zone {s}",
+                    opacity=0.8,
                 )
             )
 
-        if salles_temp:
-            fig_temp.add_trace(
-                go.Scatter(
-                    x=df_temp["Horodatage"],
-                    y=df_temp[salles_temp].mean(axis=1),
-                    name="Moyenne des Zones",
-                    line=dict(color="orange", width=2.5),
-                )
-            )
+        fig_temp.add_hline(
+            y=t_min_confort,
+            line_dash="dash",
+            line_color="blue",
+            annotation_text=f"Min ({t_min_confort}°C)",
+        )
+        fig_temp.add_hline(
+            y=t_max_confort,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"Max ({t_max_confort}°C)",
+        )
 
         fig_temp.update_layout(
             xaxis_title="Date / Heure",
             yaxis_title="Température (°C)",
-            height=400,
+            height=420,
             legend=dict(
                 orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
             ),
         )
         st.plotly_chart(fig_temp, use_container_width=True)
 
-        col_loi, col_zones = st.columns(2)
+        col_t1, col_t2 = st.columns(2)
 
-        with col_loi:
-            st.markdown("#### Loi d'Eau (T° Ext vs T° Départ)")
-            if "T_ext" in df_temp.columns and "V3V_Depart" in df_temp.columns:
-                fig_loi = px.scatter(
-                    df_temp,
-                    x="T_ext",
-                    y="V3V_Depart",
-                    labels={
-                        "T_ext": "T° Extérieure (°C)",
-                        "V3V_Depart": "Départ V3V (°C)",
-                    },
-                    title="Régulation de la Chaufferie",
-                )
-                st.plotly_chart(fig_loi, use_container_width=True)
+        with col_t1:
+            st.markdown("#### 📉 Détection Automatique des Chutes Rapides")
+            st.caption(
+                f"Détecte les baisses de plus de **{seuil_chute_temp}°C en 1h** (ex: fenêtres ouvertes / pannes)."
+            )
+
+            chute_data = []
+            for s in salles_temp:
+                diff_1h = df_temp[s].diff(4)
+                chutes_idx = df_temp[diff_1h <= -seuil_chute_temp]
+                for idx, row in chutes_idx.iterrows():
+                    val_diff = diff_1h.loc[idx]
+                    chute_data.append(
+                        {
+                            "Date / Heure": row["Horodatage"].strftime(
+                                "%d/%m/%Y %H:%M"
+                            ),
+                            "Zone": s,
+                            "T° Actuelle": f"{row[s]:.1f} °C",
+                            "Variation sur 1h": f"{val_diff:.1f} °C",
+                        }
+                    )
+
+            if chute_data:
+                st.dataframe(pd.DataFrame(chute_data), use_container_width=True)
             else:
-                st.info("Données de chaufferie (Eau) non disponibles.")
+                st.success(
+                    f"✅ Aucune chute rapide (> {seuil_chute_temp}°C/h) n'a été détectée."
+                )
 
-        with col_zones:
-            st.markdown("#### Équilibrage par Zone")
-            if salles_temp:
-                fig_salles = px.line(
-                    df_temp,
-                    x="Horodatage",
-                    y=salles_temp,
-                    title="Températures par Zone / Salle",
-                )
-                fig_salles.add_hline(
-                    y=t_min_confort,
-                    line_dash="dash",
-                    line_color="blue",
-                    annotation_text="Min Confort",
-                )
-                fig_salles.add_hline(
-                    y=t_max_confort,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="Max Confort",
-                )
-                st.plotly_chart(fig_salles, use_container_width=True)
-
-        # Bilan
-        if salles_temp:
-            st.markdown("#### Statistiques de Confort Thermique")
+        with col_t2:
+            st.markdown("#### 📊 Taux de Conformité Thermique par Zone")
             t_stats = []
             for col in salles_temp:
                 t_moy = df_temp[col].mean()
-                h_sous = (df_temp[col] < t_min_confort).sum() * 0.25
-                h_sur = (df_temp[col] > t_max_confort).sum() * 0.25
+                pct_sous = (df_temp[col] < t_min_confort).mean() * 100
+                pct_sur = (df_temp[col] > t_max_confort).mean() * 100
+                pct_ok = 100 - pct_sous - pct_sur
+
                 t_stats.append(
                     {
-                        "Zone / Salle": col,
-                        "T° Moyenne (°C)": round(t_moy, 2)
-                        if pd.notnull(t_moy)
-                        else "-",
-                        f"Sous-chauffe (<{t_min_confort}°C)": f"{h_sous:.1f} h",
-                        f"Sur-chauffe (>{t_max_confort}°C)": f"{h_sur:.1f} h",
+                        "Zone": col,
+                        "Moyenne": f"{t_moy:.1f} °C",
+                        "% Confort OK": f"{pct_ok:.1f} %",
+                        "% Sous-chauffe": f"{pct_sous:.1f} %",
+                        "% Sur-chauffe": f"{pct_sur:.1f} %",
                     }
                 )
             st.dataframe(pd.DataFrame(t_stats), use_container_width=True)
     else:
-        st.warning("⚠️ Onglet 'Température' introuvable ou vide.")
+        st.warning("⚠️ Aucune donnée de température disponible.")
 
 
 # =============================================================================
-# ONGLET 2 : HUMIDITÉ
+# ONGLET 2 : HUMIDITÉ & VARIATIONS
 # =============================================================================
 with tab_h:
-    st.subheader("Analyse de l'Humidité Relative (Onglet 'Humidité')")
+    st.subheader("📊 Analyse Hygrométrique & Chocs d'Humidité")
 
     if not df_hum.empty and salles_hum:
         fig_hum = px.line(
@@ -505,98 +563,116 @@ with tab_h:
             y=hr_min_confort,
             line_dash="dash",
             line_color="orange",
-            annotation_text=f"Min Confort ({hr_min_confort}%)",
+            annotation_text=f"Min ({hr_min_confort}%)",
         )
         fig_hum.add_hline(
             y=hr_max_confort,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"Max Confort ({hr_max_confort}%)",
+            annotation_text=f"Max ({hr_max_confort}%)",
         )
         st.plotly_chart(fig_hum, use_container_width=True)
 
-        col_h_left, col_h_right = st.columns(2)
+        col_h1, col_h2 = st.columns(2)
 
-        with col_h_left:
-            st.markdown("#### Bilan par Zone")
+        with col_h1:
+            st.markdown("#### ⚡ Variations Brutales d'Humidité (>1h)")
+            choc_hum_data = []
+            for s in salles_hum:
+                diff_1h = df_hum[s].diff(4).abs()
+                chocs = df_hum[diff_1h >= seuil_choc_hum]
+                for idx, row in chocs.iterrows():
+                    v_diff = df_hum[s].diff(4).loc[idx]
+                    choc_hum_data.append(
+                        {
+                            "Date / Heure": row["Horodatage"].strftime(
+                                "%d/%m/%Y %H:%M"
+                            ),
+                            "Zone": s,
+                            "Humidité": f"{row[s]:.1f} %",
+                            "Variation (1h)": f"{v_diff:+.1f} %",
+                        }
+                    )
+
+            if choc_hum_data:
+                st.dataframe(
+                    pd.DataFrame(choc_hum_data), use_container_width=True
+                )
+            else:
+                st.success(
+                    f"✅ Aucune variation supérieure à {seuil_choc_hum}% en 1h."
+                )
+
+        with col_h2:
+            st.markdown("#### 📈 Bilan du Taux d'Humidité")
             h_stats = []
             for col in salles_hum:
+                pct_sec = (df_hum[col] < hr_min_confort).mean() * 100
+                pct_humide = (df_hum[col] > hr_max_confort).mean() * 100
+                pct_ok = 100 - pct_sec - pct_humide
                 h_stats.append(
                     {
-                        "Zone / Salle": col,
-                        "Humidité Moyenne (%)": round(df_hum[col].mean(), 1),
-                        "Min (%)": round(df_hum[col].min(), 1),
-                        "Max (%)": round(df_hum[col].max(), 1),
-                        f"Trop Sec (<{hr_min_confort}%)": f"{(df_hum[col] < hr_min_confort).mean()*100:.1f} %",
-                        f"Trop Humide (>{hr_max_confort}%)": f"{(df_hum[col] > hr_max_confort).mean()*100:.1f} %",
+                        "Zone": col,
+                        "Moyenne": f"{df_hum[col].mean():.1f} %",
+                        "% Conforme": f"{pct_ok:.1f} %",
+                        "% Trop Sec": f"{pct_sec:.1f} %",
+                        "% Trop Humide": f"{pct_humide:.1f} %",
                     }
                 )
             st.dataframe(pd.DataFrame(h_stats), use_container_width=True)
-
-        with col_h_right:
-            st.markdown("#### Distribution des valeurs d'Humidité")
-            fig_hist = px.histogram(
-                df_hum,
-                x=salles_hum,
-                nbins=25,
-                barmode="overlay",
-                title="Répartition des mesures d'humidité",
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
     else:
-        st.warning("⚠️ Onglet 'Humidité' introuvable ou ne contenant pas de données de zone.")
+        st.warning("⚠️ Aucune donnée d'humidité disponible.")
 
 
 # =============================================================================
-# ONGLET 3 : CO2
+# ONGLET 3 : CO2 & CONFINEMENT AUTOMATISÉ
 # =============================================================================
 with tab_c:
-    st.subheader("Analyse du CO2 et du Confinement (Onglet 'CO2')")
+    st.subheader("📊 Analyse du Confinement et Renouvellement d'Air (CO2)")
 
     if not df_co2.empty and salles_co2:
         fig_co2 = px.line(
             df_co2,
             x="Horodatage",
             y=salles_co2,
-            title="Évolution du CO2 (ppm)",
+            title="Niveaux de CO2 (ppm)",
             labels={"value": "CO2 (ppm)", "variable": "Zone"},
         )
         fig_co2.add_hline(
             y=seuil_co2,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"Seuil d'Alerte ({seuil_co2} ppm)",
-        )
-        fig_co2.add_hline(
-            y=800,
-            line_dash="dot",
-            line_color="orange",
-            annotation_text="Seuil de Confort (800 ppm)",
+            annotation_text=f"Seuil Alerte ({seuil_co2} ppm)",
         )
         st.plotly_chart(fig_co2, use_container_width=True)
 
-        col_c_left, col_c_right = st.columns(2)
+        col_c1, col_c2 = st.columns(2)
 
-        with col_c_left:
-            st.markdown("#### Bilan du Confinement par Zone")
+        with col_c1:
+            st.markdown("#### 🚨 Taux de Dépassement par Zone")
             c_stats = []
             for col in salles_co2:
-                h_dep = (df_co2[col] > seuil_co2).sum() * 0.25
+                pct_dep = (df_co2[col] > seuil_co2).mean() * 100
+                pic_max = df_co2[col].max()
+                moyenne = df_co2[col].mean()
+
                 c_stats.append(
                     {
-                        "Zone / Salle": col,
-                        "Moyenne (ppm)": int(df_co2[col].mean()),
-                        "Max (ppm)": int(df_co2[col].max()),
-                        f"Temps > {seuil_co2} ppm": f"{h_dep:.1f} h",
-                        "Taux d'Alerte (%)": f"{(df_co2[col] > seuil_co2).mean()*100:.1f} %",
+                        "Zone": col,
+                        "Moyenne": f"{int(moyenne)} ppm",
+                        "Pic Max": f"{int(pic_max)} ppm",
+                        f"% Temps > {seuil_co2} ppm": f"{pct_dep:.1f} %",
+                        "Diagnostic Ventilation": "⚠️ Insuffisante"
+                        if pct_dep > 15
+                        else "✅ Correcte",
                     }
                 )
             st.dataframe(pd.DataFrame(c_stats), use_container_width=True)
 
-        with col_c_right:
-            st.markdown("#### Répartition Globale de la Qualité d'Air")
-            co2_vals_all = df_co2[salles_co2].values.flatten()
-            co2_vals_clean = co2_vals_all[~np.isnan(co2_vals_all)]
+        with col_c2:
+            st.markdown("#### 🏆 Indice de Confinement (Sévérité)")
+            co2_vals_clean = df_co2[salles_co2].values.flatten()
+            co2_vals_clean = co2_vals_clean[~np.isnan(co2_vals_clean)]
 
             bon = (co2_vals_clean < 800).sum()
             moyen = ((co2_vals_clean >= 800) & (co2_vals_clean <= seuil_co2)).sum()
@@ -610,71 +686,81 @@ with tab_c:
                 ],
                 values=[bon, moyen, eleve],
                 color_discrete_sequence=["#2ecc71", "#f39c12", "#e74c3c"],
-                title="Sévérité du Confinement (Toutes Zones)",
+                title="Répartition des heures de présence",
             )
             st.plotly_chart(fig_pie, use_container_width=True)
     else:
-        st.warning("⚠️ Onglet 'CO2' introuvable ou ne contenant pas de données de zone.")
+        st.warning("⚠️ Aucune donnée de CO2 disponible.")
 
 
 # =============================================================================
-# ONGLET 4 : COV
+# ONGLET 4 : COV & PICS DE POLLUTION
 # =============================================================================
 with tab_v:
-    st.subheader("Analyse des COV / Pollution Chimique (Onglet 'COV')")
+    st.subheader("📊 Analyse des Composés Organiques Volatils (COV)")
 
     if not df_cov.empty and salles_cov:
         fig_cov = px.line(
             df_cov,
             x="Horodatage",
             y=salles_cov,
-            title="Évolution des Composés Organiques Volatils (ppb)",
+            title="Composés Organiques Volatils (ppb)",
             labels={"value": "COV (ppb)", "variable": "Zone"},
         )
         fig_cov.add_hline(
             y=seuil_cov,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"Seuil d'Alerte ({seuil_cov} ppb)",
+            annotation_text=f"Seuil ({seuil_cov} ppb)",
         )
         st.plotly_chart(fig_cov, use_container_width=True)
 
-        col_v_left, col_v_right = st.columns(2)
+        col_v1, col_v2 = st.columns(2)
 
-        with col_v_left:
-            st.markdown("#### Bilan par Zone")
+        with col_v1:
+            st.markdown("#### 🧪 Détection des Pics de Pollution")
+            st.caption(
+                f"Recherche des valeurs dépassant la moyenne de la zone de plus de **+{seuil_pic_percent}%**."
+            )
+
+            pics_cov = []
+            for s in salles_cov:
+                moy_zone = df_cov[s].mean()
+                seuil_pic = moy_zone * (1 + seuil_pic_percent / 100)
+                df_pics = df_cov[df_cov[s] >= seuil_pic]
+
+                for idx, row in df_pics.iterrows():
+                    pics_cov.append(
+                        {
+                            "Date / Heure": row["Horodatage"].strftime(
+                                "%d/%m/%Y %H:%M"
+                            ),
+                            "Zone": s,
+                            "Valeur COV": f"{int(row[s])} ppb",
+                            "Écart / Moyenne": f"+{((row[s]/moy_zone)-1)*100:.0f} %",
+                        }
+                    )
+
+            if pics_cov:
+                st.dataframe(
+                    pd.DataFrame(pics_cov).head(20), use_container_width=True
+                )
+            else:
+                st.success("✅ Aucun pic soudain de COV n'a été détecté.")
+
+        with col_v2:
+            st.markdown("#### 📋 Synthèse COV par Zone")
             v_stats = []
             for col in salles_cov:
+                pct_dep = (df_cov[col] > seuil_cov).mean() * 100
                 v_stats.append(
                     {
-                        "Zone / Salle": col,
-                        "Moyenne (ppb)": int(df_cov[col].mean()),
-                        "Max (ppb)": int(df_cov[col].max()),
-                        f"Temps > {seuil_cov} ppb": f"{(df_cov[col] > seuil_cov).sum() * 0.25:.1f} h",
-                        "Statut": "Conforme"
-                        if df_cov[col].mean() < seuil_cov
-                        else "Élevé",
+                        "Zone": col,
+                        "Moyenne": f"{int(df_cov[col].mean())} ppb",
+                        "Max": f"{int(df_cov[col].max())} ppb",
+                        f"% > {seuil_cov} ppb": f"{pct_dep:.1f} %",
                     }
                 )
             st.dataframe(pd.DataFrame(v_stats), use_container_width=True)
-
-        with col_v_right:
-            st.markdown("#### Profil Moyen Journalier des COV")
-            df_cov_hourly = (
-                df_cov.groupby(df_cov["Horodatage"].dt.hour)[salles_cov]
-                .mean()
-                .mean(axis=1)
-                .reset_index()
-            )
-            df_cov_hourly.columns = ["Heure", "COV_Moyen"]
-
-            fig_hourly = px.bar(
-                df_cov_hourly,
-                x="Heure",
-                y="COV_Moyen",
-                labels={"Heure": "Heure de la journée", "COV_Moyen": "Moyenne (ppb)"},
-                title="Variations moyennes selon l'heure",
-            )
-            st.plotly_chart(fig_hourly, use_container_width=True)
     else:
-        st.warning("⚠️ Onglet 'COV' introuvable ou ne contenant pas de données de zone.")
+        st.warning("⚠️ Aucune donnée de COV disponible.")
