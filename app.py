@@ -1,31 +1,28 @@
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 # ==============================================================================
 # CONFIGURATION DE LA PAGE STREAMLIT
 # ==============================================================================
 st.set_page_config(
-    page_title="Analyse Thermique Multi-Zones & ΔT Chaufferie",
-    page_icon="🌡️",
+    page_title="Rapport & Diagnostic Thermique Multi-Zones",
+    page_icon="📋",
     layout="wide",
 )
 
-st.title("🌡️ Diagnostic Thermique : Zones (N, S, E, O, Aux 1-3) & ΔT Départ/Retour")
+st.title("📋 Diagnostic Thermique & Hydraulique (Analyse Données Brutes)")
 st.caption(
-    "Analyse de confort sur 7 zones et diagnostic hydraulique fin du circuit de chauffage (Départ - Retour)."
+    "Synthèse quantitative et explicative complète pour l'aide à l'analyse de vos courbes (Zones N, S, E, O, Aux 1-3 & Circuit Chaufferie)."
 )
 
-
 # ==============================================================================
-# 1. FONCTIONS DE NETTOYAGE ET CALCULS
+# 1. FONCTIONS DE TRAITEMENT DES DONNÉES
 # ==============================================================================
 
 
 def parse_chaufferie(series):
-    """Extrait T_Depart et T_Retour en gérant tous les formats (virgules, tirets, slashs)."""
+    """Extrait T_Depart et T_Retour en gérant les formats (virgules, tirets, slashs)."""
     cleaned = series.astype(str).str.replace(",", ".").str.strip()
     cleaned = cleaned.str.replace(r"[–—/]", "-", regex=True)
     split_df = cleaned.str.split("-", expand=True)
@@ -84,7 +81,7 @@ def analyser_horaires_chauffage(df, col_date, seuil_t_depart=30.0):
             "Heure de Mise en Route": h_debut,
             "Heure d'Arrêt": h_fin,
             "Durée (h)": duree,
-            "Actif": actif,
+            "Statut": "Actif" if actif else "Inactif",
         })
 
     df_quot = pd.DataFrame(resultats_quotidiens)
@@ -100,7 +97,7 @@ def analyser_horaires_chauffage(df, col_date, seuil_t_depart=30.0):
     synthese_hebdo = []
 
     for jour in ordre_jours:
-        sub = df_quot[(df_quot["Jour"] == jour) & (df_quot["Actif"])]
+        sub = df_quot[(df_quot["Jour"] == jour) & (df_quot["Statut"] == "Actif")]
         if not sub.empty:
             h_dem = sub["Heure de Mise en Route"].min()
             h_arr = sub["Heure d'Arrêt"].max()
@@ -116,19 +113,42 @@ def analyser_horaires_chauffage(df, col_date, seuil_t_depart=30.0):
             "Jour": jour,
             "Mise en Route": h_dem,
             "Arrêt": h_arr,
-            "Durée Moyenne": f"{dur_m} h",
+            "Durée Moyenne (h)": dur_m,
             "Statut": statut,
         })
 
     return pd.DataFrame(synthese_hebdo), df_quot
 
 
+def calculer_stats_periode(df_sub, zones):
+    """Calcule les métriques clés de température et de confort pour un sous-ensemble de données."""
+    stats = []
+    for z in zones:
+        vals = df_sub[z].dropna()
+        if not vals.empty:
+            stats.append({
+                "Zone": z,
+                "Min (°C)": round(vals.min(), 1),
+                "Moyenne (°C)": round(vals.mean(), 1),
+                "Max (°C)": round(vals.max(), 1),
+                "Écart-type (°C)": round(vals.std(), 2),
+                "Sous-chauffe <19°C (%)": round(
+                    (vals < 19.0).mean() * 100, 1
+                ),
+                "Confort 19-22°C (%)": round(
+                    ((vals >= 19.0) & (vals <= 22.0)).mean() * 100, 1
+                ),
+                "Surchauffe >22°C (%)": round((vals > 22.0).mean() * 100, 1),
+            })
+    return pd.DataFrame(stats)
+
+
 # ==============================================================================
-# 2. CHARGEMENT / GENERATION DES DONNEES (7 ZONES + CHAUFFERIE)
+# 2. CHARGEMENT DES DONNÉES
 # ==============================================================================
-st.sidebar.header("📥 Importation des données")
+st.sidebar.header("📥 Fichier de Données")
 uploaded_file = st.sidebar.file_uploader(
-    "Téléverser un fichier Excel ou CSV", type=["xlsx", "csv"]
+    "Téléverser votre fichier Excel ou CSV", type=["xlsx", "csv"]
 )
 
 if uploaded_file is not None:
@@ -137,9 +157,7 @@ if uploaded_file is not None:
     else:
         df_raw = pd.read_csv(uploaded_file)
 else:
-    st.sidebar.info(
-        "💡 Génération de données de démonstration avec les 7 zones (N, S, E, O, Aux 1, Aux 2, Aux 3)."
-    )
+    st.sidebar.info("💡 Fichier de démonstration chargé (7 zones + chaufferie).")
     dates = pd.date_range("2026-03-02 00:00", "2026-03-08 23:45", freq="15min")
     n = len(dates)
     hours = dates.hour + dates.minute / 60.0
@@ -149,7 +167,6 @@ else:
         5 + 4 * np.sin((hours - 9) * np.pi / 12) + np.random.normal(0, 0.4, n)
     )
 
-    # Simulation des 7 zones
     t_nord = np.where(
         is_work,
         19.5 + np.random.normal(0, 0.3, n),
@@ -171,19 +188,16 @@ else:
         0.0,
     )
 
-    # 3 Zones Auxiliaires
-    t_aux1 = t_nord - 1.8 + np.random.normal(0, 0.3, n)  # Sous-chauffée
-    t_aux2 = t_nord + 0.3 + np.random.normal(0, 0.2, n)  # Conforme
-    t_aux3 = t_nord + 2.1 + np.random.normal(0, 0.4, n)  # Surchauffée
+    t_aux1 = t_nord - 1.8 + np.random.normal(0, 0.3, n)
+    t_aux2 = t_nord + 0.3 + np.random.normal(0, 0.2, n)
+    t_aux3 = t_nord + 2.1 + np.random.normal(0, 0.4, n)
 
-    # Circuit Chaufferie
     heating_on = (dates.weekday < 5) & (hours >= 5.5) & (hours < 18.5)
     t_dep = np.where(
         heating_on,
         56 - 1.3 * t_ext + np.random.normal(0, 0.7, n),
         20 + np.random.normal(0, 0.2, n),
     )
-    # Delta T moyen ~ 10.5 °C en fonctionnement actif
     t_ret = np.where(
         heating_on, t_dep - (10.5 + np.random.normal(0, 0.9, n)), t_dep - 0.4
     )
@@ -217,9 +231,9 @@ col_date = col_date_candidates[0] if col_date_candidates else df.columns[0]
 df[col_date] = pd.to_datetime(
     df[col_date], errors="coerce", dayfirst=True, format="mixed"
 )
-df = df.dropna(subset=[col_date]).copy()
+df = df.dropna(subset=[col_date]).sort_values(col_date).reset_index(drop=True)
 
-# Parsing Chaufferie et calcul du Delta T
+# Traitement Chaufferie
 cols_chaufferie = [
     c
     for c in df.columns
@@ -231,293 +245,266 @@ col_chaufferie = cols_chaufferie[0] if cols_chaufferie else df.columns[-1]
 df["T_Depart"], df["T_Retour"] = parse_chaufferie(df[col_chaufferie])
 df["Delta_T"] = df["T_Depart"] - df["T_Retour"]
 
-# Horaires de chauffe
-df_synth_horaires, df_quot_horaires = analyser_horaires_chauffage(df, col_date)
+# Détection automatique de TOUTES les colonnes de zones
+cols_exclues = [
+    col_date,
+    col_chaufferie,
+    "T_Depart",
+    "T_Retour",
+    "Delta_T",
+]
+col_ext_candidates = [c for c in df.columns if "ext" in c.lower()]
+if col_ext_candidates:
+    cols_exclues.append(col_ext_candidates[0])
 
+# Toutes les autres colonnes numériques sont traitées comme des zones
+zones_détectées = [
+    c
+    for c in df.columns
+    if c not in cols_exclues and pd.api.types.is_numeric_dtype(df[c])
+]
 
-# ==============================================================================
-# 3. STATISTIQUES DES 7 ZONES ET DE LA CHAUFFERIE
-# ==============================================================================
+# Définition des périodes temporelles
 df["Jour_Semaine"] = df[col_date].dt.weekday
 df["Heure_Dec"] = df[col_date].dt.hour + df[col_date].dt.minute / 60.0
-is_occ = (
+
+is_occupation = (
     (df["Jour_Semaine"] < 5)
     & (df["Heure_Dec"] >= 8.0)
     & (df["Heure_Dec"] < 18.0)
 )
-is_heating_active = df["T_Depart"] > 30.0
+is_inoccupation = ~is_occupation
+is_chauffe_active = df["T_Depart"] > 30.0
 
-# 7 Zones cibles
-cibles_zones = ["Nord", "Sud", "Est", "Ouest", "Aux 1", "Aux 2", "Aux 3"]
-zones_trouvees = []
-
-for zone in cibles_zones:
-    matches = [c for c in df.columns if zone.lower() in c.lower()]
-    if matches:
-        zones_trouvees.append(matches[0])
-
-# Fallback si noms légèrement différents dans le fichier client
-if not zones_trouvees:
-    zones_trouvees = [
-        c
-        for c in df.columns
-        if c not in [col_date, col_chaufferie, "T_Depart", "T_Retour", "Delta_T"]
-        and "ext" not in c.lower()
-    ]
-
-# Calculs Confort Ambiance
-stats_zones = []
-for z in zones_trouvees:
-    vals_occ = df.loc[is_occ, z]
-    if not vals_occ.empty:
-        stats_zones.append({
-            "Zone": z,
-            "Temp. Min (°C)": round(vals_occ.min(), 1),
-            "Temp. Moyenne (°C)": round(vals_occ.mean(), 1),
-            "Temp. Max (°C)": round(vals_occ.max(), 1),
-            "Confort [19-22°C] (%)": round(
-                ((vals_occ >= 19.0) & (vals_occ <= 22.0)).mean() * 100, 1
-            ),
-            "Sous-chauffe <19°C (%)": round(
-                (vals_occ < 19.0).mean() * 100, 1
-            ),
-            "Surchauffe >22°C (%)": round((vals_occ > 22.0).mean() * 100, 1),
-        })
-
-df_stats_zones = pd.DataFrame(stats_zones)
-
-# Metrics Delta T (Période active)
-df_active = df[is_heating_active]
-dt_moy = df_active["Delta_T"].mean() if not df_active.empty else 0.0
-dt_min = df_active["Delta_T"].min() if not df_active.empty else 0.0
-dt_max = df_active["Delta_T"].max() if not df_active.empty else 0.0
-dep_moy = df_active["T_Depart"].mean() if not df_active.empty else 0.0
-ret_moy = df_active["T_Retour"].mean() if not df_active.empty else 0.0
+# Synthese des horaires
+df_synth_horaires, df_quot_horaires = analyser_horaires_chauffage(df, col_date)
 
 
 # ==============================================================================
-# 4. AFFICHAGE DE L'INTERFACE STREAMLIT
+# 3. INTERFACE STREAMLIT - ANALYSE ET EXPLICATIONS
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# RESUME DU PERIMETRE DES DONNEES
+# ------------------------------------------------------------------------------
+st.info(
+    f"📌 **Périmètre d'analyse complet** : **{len(df)} points de mesure** du **{df[col_date].min().strftime('%d/%m/%Y %H:%M')}** au **{df[col_date].max().strftime('%d/%m/%Y %H:%M')}**.\n\n"
+    f"• **Zones identifiées ({len(zones_détectées)})** : {', '.join(zones_détectées)}\n\n"
+    f"• **100% des pas de temps sont pris en compte** dans l'analyse globale ci-dessous."
+)
+
+st.markdown("---")
 
 # ------------------------------------------------------------------------------
 # SECTION 1 : DIAGNOSTIC HYDRAULIQUE ΔT (DEPART - RETOUR)
 # ------------------------------------------------------------------------------
-st.subheader("🔥 1. Diagnostic Hydraulique : Écart Départ - Retour (ΔT)")
+st.header("🔥 1. Diagnostic Hydraulique : Écart Départ - Retour (ΔT)")
 st.write(
-    "L'analyse du $\Delta T = T_{Départ} - T_{Retour}$ permet d'évaluer la qualité d'irrigation hydraulique du réseau de chauffage."
+    """
+    **Pourquoi cette valeur est essentielle pour votre analyse de courbe ?**  
+    Le $\Delta T = T_{Départ} - T_{Retour}$ mesure la quantité de chaleur cédée par l'eau du réseau au bâtiment. 
+    En comparant la courbe de départ et la courbe de retour sur votre graphique, observez l'écart vertical entre les deux tracés.
+    """
 )
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Régime Moyen (Départ / Retour)", f"{dep_moy:.1f}°C / {ret_moy:.1f}°C")
-kpi2.metric("ΔT Moyen (En Chauffe)", f"{dt_moy:.1f} °C")
-kpi3.metric("ΔT Plage (Min / Max)", f"{dt_min:.1f}°C / {dt_max:.1f}°C")
+dt_glob_moy = df["Delta_T"].mean()
+dt_act_moy = (
+    df.loc[is_chauffe_active, "Delta_T"].mean()
+    if not df[is_chauffe_active].empty
+    else 0.0
+)
+dt_act_min = (
+    df.loc[is_chauffe_active, "Delta_T"].min()
+    if not df[is_chauffe_active].empty
+    else 0.0
+)
+dt_act_max = (
+    df.loc[is_chauffe_active, "Delta_T"].max()
+    if not df[is_chauffe_active].empty
+    else 0.0
+)
 
-# Diagnostic automatique du régime hydraulique
-if dt_moy < 6.0:
-    statut_dt = "🔴 Sur-débit / Court-circuit hydraulique"
-    explication_dt = (
-        "Le ΔT est trop faible (< 6°C). L'eau revient trop chaude en chaufferie sans céder ses calories aux locaux. "
-        "Risques : surconsommation de pompage, mauvaise condensation de la chaudière."
+col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+col_m1.metric(
+    "T° Départ Moy. (En chauffe)",
+    f"{df.loc[is_chauffe_active, 'T_Depart'].mean():.1f} °C",
+)
+col_m2.metric(
+    "T° Retour Moy. (En chauffe)",
+    f"{df.loc[is_chauffe_active, 'T_Retour'].mean():.1f} °C",
+)
+col_m3.metric("ΔT Moy. (Période Active)", f"{dt_act_moy:.1f} °C")
+col_m4.metric("ΔT Min / Max (Active)", f"{dt_act_min:.1f} / {dt_act_max:.1f} °C")
+
+# Analyse textuelle du régime hydraulique
+st.subheader("💡 Diagnostic du Régime Hydraulique")
+
+if dt_act_moy < 6.0:
+    st.error(
+        f"🔴 **Diagnostic : Sur-débit ou court-circuit hydraulique ($\Delta T = {dt_act_moy:.1f}^\circ\text{C}$)**\n\n"
+        "**Ce que vous devez observer sur vos courbes :** La courbe de retour est presque collée à la courbe de départ.\n\n"
+        "**Explication technique :** L'eau circule trop vite dans la boucle ou passe par une bouteille de mélange/vanne 3 voies sans irriguer correctement les émetteurs. "
+        "L'eau revient trop chaude en chaufferie.\n\n"
+        "**Conséquences :** Surconsommation électrique des pompes de circulation, impossibilité pour une chaudière à condensation ou une PAC de condenser efficacement."
     )
-elif 6.0 <= dt_moy <= 15.0:
-    statut_dt = "🟢 Régime Hydraulique Équilibré"
-    explication_dt = (
-        "Le ΔT est dans la plage optimale (6°C à 15°C). La circulation d'eau est adaptée au transfert de chaleur des émetteurs."
+elif 6.0 <= dt_act_moy <= 15.0:
+    st.success(
+        f"🟢 **Diagnostic : Régime hydraulique équilibré ($\Delta T = {dt_act_moy:.1f}^\circ\text{C}$)**\n\n"
+        "**Ce que vous devez observer sur vos courbes :** Un écart régulier et stable entre départ et retour (entre 6°C et 15°C).\n\n"
+        "**Explication technique :** Le débit de la pompe est bien dimensionné par rapport à l'émission. Les radiateurs / planchers chauffants cèdent correctement leurs calories."
     )
 else:
-    statut_dt = "🟠 Sous-débit / Perte de charge excessive"
-    explication_dt = (
-        "Le ΔT est très élevé (> 15°C). L'eau refroidit trop vite dans le réseau avant d'atteindre les extrémités. "
-        "Risques : sous-chauffe des zones éloignées, vitesse de circulation insuffisante."
+    st.warning(
+        f"🟠 **Diagnostic : Sous-débit ou perte de charge excessive ($\Delta T = {dt_act_moy:.1f}^\circ\text{C}$)**\n\n"
+        "**Ce que vous devez observer sur vos courbes :** Un très grand écart vertical entre la courbe de départ et de retour.\n\n"
+        "**Explication technique :** L'eau met trop de temps à parcourir le réseau et refroidit excessivement avant de revenir en chaufferie.\n\n"
+        "**Conséquences :** Risque fort de sous-chauffer les zones situées en bout de réseau (les radiateurs les plus éloignés sont froids)."
     )
-
-kpi4.metric("Diagnostic Hydraulique", statut_dt.split()[1])
-
-# Box d'interprétation du Delta T
-with st.container():
-    st.info(f"**Analyse du régime hydraulique :** {statut_dt}\n\n{explication_dt}")
-
-# Graphiques dédiés ΔT
-col_dt1, col_dt2 = st.columns([2, 1])
-
-with col_dt1:
-    fig_dt = go.Figure()
-    fig_dt.add_trace(
-        go.Scatter(
-            x=df[col_date],
-            y=df["T_Depart"],
-            name="T° Départ (°C)",
-            line=dict(color="#d9534f", width=1.5),
-        )
-    )
-    fig_dt.add_trace(
-        go.Scatter(
-            x=df[col_date],
-            y=df["T_Retour"],
-            name="T° Retour (°C)",
-            line=dict(color="#f0ad4e", width=1.5),
-        )
-    )
-    fig_dt.add_trace(
-        go.Scatter(
-            x=df[col_date],
-            y=df["Delta_T"],
-            name="ΔT (Départ - Retour)",
-            line=dict(color="#0275d8", width=2, dash="dot"),
-        )
-    )
-
-    fig_dt.update_layout(
-        title="Évolution temporelle des températures de départ, retour et du ΔT",
-        height=380,
-        xaxis_title="Date",
-        yaxis_title="Température / Écart (°C)",
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_dt, use_container_width=True)
-
-with col_dt2:
-    if not df_active.empty:
-        fig_hist = px.histogram(
-            df_active,
-            x="Delta_T",
-            nbins=20,
-            title="Distribution du ΔT en période de chauffe",
-            labels={"Delta_T": "ΔT (°C)"},
-            color_discrete_sequence=["#0275d8"],
-        )
-        fig_hist.add_vline(
-            x=6, line_dash="dash", line_color="orange", annotation_text="Min 6°C"
-        )
-        fig_hist.add_vline(
-            x=15, line_dash="dash", line_color="red", annotation_text="Max 15°C"
-        )
-        fig_hist.update_layout(
-            height=380, yaxis_title="Nombre de mesures (15 min)"
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
 
 st.markdown("---")
 
 
 # ------------------------------------------------------------------------------
-# SECTION 2 : BILAN DU CONFORT SUR LES 7 ZONES (N, S, E, O, AUX 1, AUX 2, AUX 3)
+# SECTION 2 : ANALYSE DES TEMPERATURES DE ZONES (TOUTES LES DONNEES)
 # ------------------------------------------------------------------------------
-st.subheader("🏢 2. Bilan de Confort par Zone (Période d'Occupation : 8h-18h, Lun-Ven)")
+st.header("🏢 2. Analyse Complète des Températures de Zones")
+st.write(
+    "Pour vous aider à interpréter vos courbes d'ambiance, les données ci-dessous prennent en compte **l'intégralité des enregistrements** découpés en 3 filtres distincts."
+)
 
-if not df_stats_zones.empty:
-    st.dataframe(df_stats_zones, use_container_width=True, hide_index=True)
+tab_occ, tab_inocc, tab_glob = st.tabs([
+    "👔 Période d'Occupation (8h-18h, Lun-Ven)",
+    "🌙 Période d'Inoccupation (Nuits & WE)",
+    "🌐 Globale (24h/24 - 100% des données)",
+])
 
-    col_bon, col_mauv = st.columns(2)
+with tab_occ:
+    st.subheader("Statistiques en Période d'Occupation")
+    df_stats_occ = calculer_stats_periode(df[is_occupation], zones_détectées)
+    st.dataframe(df_stats_occ, use_container_width=True, hide_index=True)
 
-    with col_bon:
-        st.markdown("### 👍 Points Forts par Zone")
-        conforme_85 = df_stats_zones[
-            df_stats_zones["Confort [19-22°C] (%)"] >= 85.0
-        ]["Zone"].tolist()
-        if conforme_85:
-            st.write(
-                f"✔️ **Zones très bien régulées (≥85% de confort)** : **{', '.join(conforme_85)}**"
-            )
-        else:
-            st.write("⚠️ Aucune zone ne maintient 85% du temps la plage 19°C-22°C.")
+with tab_inocc:
+    st.subheader("Statistiques en Période d'Inoccupation / Réduit")
+    df_stats_inocc = calculer_stats_periode(df[is_inoccupation], zones_détectées)
+    st.dataframe(df_stats_inocc, use_container_width=True, hide_index=True)
 
-    with col_mauv:
-        st.markdown("### ⚠️ Dysfonctionnements Détectés")
-        sous_chauffees = df_stats_zones[
-            df_stats_zones["Sous-chauffe <19°C (%)"] > 15.0
-        ]
-        surchauffees = df_stats_zones[
-            df_stats_zones["Surchauffe >22°C (%)"] > 15.0
-        ]
+with tab_glob:
+    st.subheader("Statistiques Globales sur l'Ensemble de la Plage Temporelle")
+    df_stats_glob = calculer_stats_periode(df, zones_détectées)
+    st.dataframe(df_stats_glob, use_container_width=True, hide_index=True)
 
-        if not sous_chauffees.empty:
-            for _, r in sous_chauffees.iterrows():
+# Diagnostic détaillé zone par zone
+st.subheader("🔍 Explications et Synthèse Zone par Zone")
+
+if not df_stats_occ.empty:
+    for _, row in df_stats_occ.iterrows():
+        z_name = row["Zone"]
+        tmoy_occ = row["Moyenne (°C)"]
+        tmoy_inocc = (
+            df_stats_inocc.loc[
+                df_stats_inocc["Zone"] == z_name, "Moyenne (°C)"
+            ].values[0]
+            if not df_stats_inocc.empty
+            else 0.0
+        )
+        sous_c = row["Sous-chauffe <19°C (%)"]
+        sur_c = row["Surchauffe >22°C (%)"]
+
+        with st.expander(
+            f"📍 Zone : {z_name} — Moyenne Occupation : {tmoy_occ}°C | Inoccupation : {tmoy_inocc}°C",
+            expanded=True,
+        ):
+            c_text1, c_text2 = st.columns(2)
+
+            with c_text1:
+                st.markdown("**Bilan de Confort (8h-18h)** :")
                 st.write(
-                    f"❌ **Sous-chauffe sur {r['Zone']}** : **{r['Sous-chauffe <19°C (%)']}%** du temps sous 19°C (Moy : {r['Temp. Moyenne (°C)']}°C)."
+                    f"• Confort (19-22°C) : **{row['Confort 19-22°C (%)']}%**"
                 )
+                st.write(f"• Temps en sous-chauffe (<19°C) : **{sous_c}%**")
+                st.write(f"• Temps en surchauffe (>22°C) : **{sur_c}%**")
 
-        if not surchauffees.empty:
-            for _, r in surchauffees.iterrows():
-                surconso = round((r["Temp. Moyenne (°C)"] - 19.0) * 7.0, 1)
+            with c_text2:
+                st.markdown("**Que vérifier sur vos courbes visuelles ?**")
+                if sous_c > 15.0:
+                    st.write(
+                        f"❌ **Courbe trop basse** : La zone est sous-chauffée. Vérifiez sur la courbe si la montée en température du matin est trop lente (manque d'anticipation ou débit insuffisant sur cette zone)."
+                    )
+                elif sur_c > 15.0:
+                    surconso = round((tmoy_occ - 19.0) * 7.0, 1)
+                    st.write(
+                        f"⚠️ **Courbe trop haute** : La courbe dépasse souvent 22°C. Surchauffe générant environ **+{surconso}%** de surconsommation. Observez si les apports solaires (Sud/Est) ou un problème d'équilibrage/thermostat en sont la cause."
+                    )
+                else:
+                    st.write(
+                        "🟢 **Courbe stable** : La température oscille bien dans la plage de confort recommandée."
+                    )
+
+                delta_reduit = round(tmoy_occ - tmoy_inocc, 1)
                 st.write(
-                    f"❌ **Surchauffe sur {r['Zone']}** : **{r['Surchauffe >22°C (%)']}%** du temps >22°C. Surconsommation approx. : **+{surconso}%**."
+                    f"• **Écart Confort / Réduit** : **{delta_reduit} °C** de baisse moyenne la nuit. "
+                    f"*(Si < 1.5°C : le réduit de nuit est mal appliqué sur cette zone. Si > 4°C : inertie faible ou déperditions fortes).* "
                 )
 
 st.markdown("---")
 
 
 # ------------------------------------------------------------------------------
-# SECTION 3 : HORAIRES DE MISE EN ROUTE ET D'ARRET
+# SECTION 3 : PLAGES HORAIRES DE CHAUFFAGE (FONCTIONNEMENT RÉEL)
 # ------------------------------------------------------------------------------
-st.subheader("🕒 3. Plages Horaires de Chauffage Détectées")
-st.dataframe(df_synth_horaires, use_container_width=True, hide_index=True)
+st.header("🕒 3. Analyse de la Régulation Temporelle Chaufferie")
+st.write(
+    "Cette section analyse à quels moments la température de départ dépasse 30°C pour identifier la logique de régulation."
+)
 
-with st.expander("📅 Consulter le détail jour par jour"):
+c_h1, c_h2 = st.columns([1, 1])
+
+with c_h1:
+    st.subheader("Synthèse Hebdomadaire")
+    st.dataframe(df_synth_horaires, use_container_width=True, hide_index=True)
+
+with c_h2:
+    st.subheader("Explications pour l'Analyse des Courbes")
+    st.markdown(
+        """
+        **Éléments à vérifier lors de la lecture de vos courbes :**
+        
+        1. **Heure d'anticipation le matin** :
+           * Comparez l'heure de mise en route de la chaufferie avec l'heure à laquelle les zones atteignent 19°C.
+           * Si la température de zone atteint 19°C seulement à 10h du matin, la relance doit être anticipée plus tôt.
+        
+        2. **Coupure anticipée le soir** :
+           * Vérifiez si la chaufferie s'arrête vers 16h-17h sans impacter le confort des occupants avant 18h (utilisation de l'inertie du bâtiment).
+        
+        3. **Fonctionnement le Week-End** :
+           * Si les jours de week-end affichent le statut **Actif**, vérifiez sur vos courbes s'il s'agit d'un maintien de réduit hors gel ou d'un chauffage inutile à température de confort.
+        """
+    )
+
+with st.expander("📅 Voir le détail quotidien d'activation de la chaufferie"):
     st.dataframe(df_quot_horaires, use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
 
 # ------------------------------------------------------------------------------
-# SECTION 4 : GRAPHIQUE COMPARAISON TEMPORELLE MULTI-ZONES
+# SECTION 4 : GUIDE D'AIDE À LA LECTURE MANUELLE DE VOS COURBES
 # ------------------------------------------------------------------------------
-st.subheader("📈 4. Graphique Temporel Multi-Zones")
+st.header("💡 4. Guide Pratique pour Analyser vos Courbes Visuelles")
 
-# Sélecteur de zones interactif
-selected_zones = st.multiselect(
-    "Sélectionner les zones à afficher sur le graphique :",
-    options=zones_trouvees,
-    default=zones_trouvees,
+st.markdown(
+    """
+Sur la base des résultats chiffrés ci-dessus, voici la méthodologie pas à pas pour contrôler vos graphiques :
+
+### Step 1 : Comparer l'orientation des zones (N, S, E, O)
+* **Zones Nord & Auxiliaires défavorisées** : Vérifiez sur votre courbe si ces zones restent systématiquement sous le plateau des autres zones. Si oui, l'équilibrage du réseau est à revoir (augmenter le débit sur ces antennes).
+* **Zones Sud & Est** : Recherchez les pics de température l'après-midi ou le matin. Si la courbe monte au-delà de 23°C alors que le chauffage tourne, la régulation ne prend pas en compte les **apports gratuits solaires** (besoin de sondes d'ambiance ou de robinets thermostatiques).
+
+### Step 2 : Analyser la pente des courbes de chaufferie
+* **Loi d'eau** : Comparez la courbe de départ chaufferie avec la courbe de température extérieure. Lorsque la température extérieure chute, la température de départ doit monter proportionnellement.
+* **Cycles courts (Pompage / Oscillations)** : Si la courbe de départ fait des "dents de scie" très rapprochées (montées et descentes en moins de 15 min), la chaudière ou la pompe est en sur-puissance par rapport au besoin réel.
+
+### Step 3 : Valider le comportement global des zones Aux 1, Aux 2, Aux 3
+* Comparez l'écart permanent entre la zone la plus chaude et la zone la plus froide. Si cet écart dépasse **3°C à 4°C** au même instant t, le réseau hydraulique présente un défaut d'équilibrage majeur.
+"""
 )
-
-col_ext_candidates = [c for c in df.columns if "ext" in c.lower()]
-col_ext = col_ext_candidates[0] if col_ext_candidates else None
-
-fig_multi = go.Figure()
-
-# Graphique des zones sélectionnées
-for z in selected_zones:
-    fig_multi.add_trace(
-        go.Scatter(x=df[col_date], y=df[z], name=f"Zone {z}", mode="lines")
-    )
-
-# Ajout de la T° Extérieure si disponible
-if col_ext:
-    fig_multi.add_trace(
-        go.Scatter(
-            x=df[col_date],
-            y=df[col_ext],
-            name="T° Extérieure",
-            line=dict(color="black", dash="dash", width=1.5),
-        )
-    )
-
-# Tracés Départ et Retour Chaufferie
-fig_multi.add_trace(
-    go.Scatter(
-        x=df[col_date],
-        y=df["T_Depart"],
-        name="Départ Chaufferie",
-        line=dict(color="red", width=1.5),
-        visible="legendonly",
-    )
-)
-fig_multi.add_trace(
-    go.Scatter(
-        x=df[col_date],
-        y=df["T_Retour"],
-        name="Retour Chaufferie",
-        line=dict(color="orange", width=1.5),
-        visible="legendonly",
-    )
-)
-
-fig_multi.update_layout(
-    height=550,
-    xaxis_title="Date / Heure",
-    yaxis_title="Température (°C)",
-    hovermode="x unified",
-)
-
-st.plotly_chart(fig_multi, use_container_width=True)
