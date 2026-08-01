@@ -3,271 +3,197 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
 import io
 
-# ==============================================================================
-# 1. CONFIGURATION DE LA PAGE
-# ==============================================================================
-st.set_page_config(
-    page_title="Optimisation Chauffage & Occupation",
-    page_icon="🔥",
-    layout="wide"
-)
+st.set_page_config(page_title="Étape 1 - Analyse Températures", page_icon="🌡️", layout="wide")
+
+st.title("🌡️ Étape 1 : Diagnostic Thermique du Premier Onglet")
+st.caption("Analyse des zones (Nord, Sud, Est, Ouest, Aux 1-3), de l'extérieur et du circuit chaufferie.")
 
 # ==============================================================================
-# 2. GENERATION DE DONNEES PAR DEFAUT (DEMO)
+# 1. CHARGEMENT ET PRETRAITEMENT DES DONNEES
 # ==============================================================================
+uploaded_file = st.sidebar.file_uploader("Fichier Excel (.xlsx) ou CSV (4 onglets)", type=["xlsx", "csv"])
+
 @st.cache_data
-def generate_sample_data(days=14):
-    start_date = datetime(2026, 3, 1, 0, 0)
-    dates = [start_date + timedelta(minutes=15 * i) for i in range(days * 24 * 4)]
-    
-    zones = ["Bureau Nord (Individuel)", "Open Space Sud", "Salle Réunion Est", "Atelier Logistique"]
-    
-    df_co2 = pd.DataFrame({'Horodatage': dates})
-    df_temp = pd.DataFrame({'Horodatage': dates})
-    
-    np.random.seed(42)
-    schedules = {
-        "Bureau Nord (Individuel)": {"heat_start": 6.0, "occ_start": 8.5},
-        "Open Space Sud":           {"heat_start": 6.0, "occ_start": 8.0},
-        "Salle Réunion Est":       {"heat_start": 6.0, "occ_start": 9.5},
-        "Atelier Logistique":       {"heat_start": 5.5, "occ_start": 7.0}
-    }
-    
-    for z in zones:
-        heat_h = schedules[z]["heat_start"]
-        occ_h = schedules[z]["occ_start"]
-        
-        is_weekday = df_co2['Horodatage'].dt.weekday < 5
-        hours = df_co2['Horodatage'].dt.hour + df_co2['Horodatage'].dt.minute / 60.0
-        
-        occ_active = is_weekday & (hours >= occ_h) & (hours < 18.0)
-        co2_base = 420
-        co2_add = np.where(occ_active, np.random.normal(550, 80, len(dates)), 0)
-        df_co2[z] = np.clip(co2_base + co2_add, 400, 1800).astype(int)
-        
-        heat_active = is_weekday & (hours >= heat_h) & (hours < 18.5)
-        temp_val = np.where(
-            heat_active, 
-            20.0 + np.random.normal(0, 0.2, len(dates)), 
-            16.0 + np.random.normal(0, 0.3, len(dates))
-        )
-        df_temp[z] = np.round(temp_val, 1)
-        
-    return df_co2, df_temp, zones
-
-# ==============================================================================
-# 3. MOTEUR D'ANALYSE ET DE CALCUL
-# ==============================================================================
-def analyser_chauffage_vs_presence(df_co2, df_temp, zones, seuil_co2, seuil_temp, inertie_min):
-    df_base = pd.DataFrame({'Horodatage': pd.to_datetime(df_co2['Horodatage'])})
-    df_base['Date'] = df_base['Horodatage'].dt.date
-    df_base['Jour_Semaine'] = df_base['Horodatage'].dt.weekday
-    df_base['Heure_Decimal'] = df_base['Horodatage'].dt.hour + df_base['Horodatage'].dt.minute / 60.0
-
-    df_wk = df_base[df_base['Jour_Semaine'] < 5].copy()
-    resultats = []
-    
-    for z in zones:
-        if z not in df_co2.columns or z not in df_temp.columns:
-            continue
-
-        df_wk['CO2'] = df_co2.loc[df_wk.index, z]
-        df_wk['Temp'] = df_temp.loc[df_wk.index, z]
-        
-        df_wk['Is_Occ'] = df_wk['CO2'] >= seuil_co2
-        df_wk['Is_Heating'] = df_wk['Temp'] >= seuil_temp
-
-        daily_metrics = []
-        
-        for date_jour, group in df_wk.groupby('Date'):
-            group_matin = group[group['Heure_Decimal'] < 12.0]
-            
-            rows_heat = group_matin[group_matin['Is_Heating']]
-            rows_occ = group_matin[group_matin['Is_Occ']]
-
-            if not rows_heat.empty and not rows_occ.empty:
-                t_heat = rows_heat['Heure_Decimal'].min()
-                t_occ = rows_occ['Heure_Decimal'].min()
-                
-                daily_metrics.append({
-                    'Heure_Heat': t_heat,
-                    'Heure_Occ': t_occ,
-                    'Ecart_Heures': t_occ - t_heat
-                })
-
-        df_daily = pd.DataFrame(daily_metrics)
-        
-        if not df_daily.empty:
-            avg_heat = df_daily['Heure_Heat'].mean()
-            avg_occ = df_daily['Heure_Occ'].mean()
-            avg_ecart = df_daily['Ecart_Heures'].mean()
-            
-            inertie_h = inertie_min / 60.0
-            sur_prechauffage = max(0.0, avg_ecart - inertie_h)
-            horaire_recommande_dec = max(0.0, avg_occ - inertie_h)
-            
-            format_time = lambda dec: f"{int(dec):02d}h{int((dec % 1) * 60):02d}"
-
-            resultats.append({
-                'Zone': z,
-                'Start Chauffage Constaté': format_time(avg_heat),
-                'Première Arrivée (CO₂)': format_time(avg_occ),
-                'Préchauffage Constaté': f"{avg_ecart:.2f} h",
-                'Sur-Préchauffage Inutile': f"{sur_prechauffage:.2f} h/jour",
-                'Réglage GTB Cible': format_time(horaire_recommande_dec),
-                'Heat_Dec': avg_heat,
-                'Occ_Dec': avg_occ,
-                'Rec_Dec': horaire_recommande_dec,
-                'Gachis_H': sur_prechauffage
-            })
-            
-    return pd.DataFrame(resultats)
-
-# ==============================================================================
-# 4. BARRE LATERALE (PARAMETRES & CHARGEMENT FICHIERS)
-# ==============================================================================
-st.sidebar.title("🛠️ Configuration")
-
-st.sidebar.subheader("1. Source des données")
-source_mode = st.sidebar.radio("Choix de la source :", ["Données de démonstration", "Importer mes fichiers CSV"])
-
-if source_mode == "Importer mes fichiers CSV":
-    file_co2 = st.sidebar.file_uploader("Fichier CO₂ (CSV)", type=["csv"])
-    file_temp = st.sidebar.file_uploader("Fichier Températures (CSV)", type=["csv"])
-    
-    if file_co2 and file_temp:
-        df_co2 = pd.read_csv(file_co2)
-        df_temp = pd.read_csv(file_temp)
-        zones_list = [c for c in df_co2.columns if c != 'Horodatage']
+def load_first_sheet(file):
+    if file.name.endswith('.xlsx'):
+        # Charge le premier onglet par son index 0
+        df = pd.read_excel(file, sheet_name=0)
     else:
-        st.sidebar.warning("Veuillez charger les 2 fichiers CSV. Passage automatique en mode démo.")
-        df_co2, df_temp, zones_list = generate_sample_data()
+        df = pd.read_csv(file)
+    return df
+
+if uploaded_file is not None:
+    df_raw = load_first_sheet(uploaded_file)
 else:
-    df_co2, df_temp, zones_list = generate_sample_data()
+    st.info("💡 Aucun fichier importé. Génération automatique de données d'exemple pour démonstration.")
+    # Génération de données de test
+    dates = pd.date_range("2026-03-01 00:00", "2026-03-07 23:45", freq="15min")
+    n = len(dates)
+    hours = dates.hour + dates.minute / 60.0
+    is_work = (dates.weekday < 5) & (hours >= 8) & (hours < 18)
+    
+    t_ext = 5 + 4 * np.sin((hours - 9) * np.pi / 12) + np.random.normal(0, 0.4, n)
+    t_nord = np.where(is_work, 19.8 + np.random.normal(0, 0.3, n), 17.0 + np.random.normal(0, 0.4, n))
+    t_sud = t_nord + np.where(is_work & (hours >= 11) & (hours <= 16), 2.2 + np.random.normal(0, 0.4, n), 0)
+    t_est = t_nord + np.where(is_work & (hours >= 8) & (hours <= 12), 1.2, 0)
+    t_ouest = t_nord + np.where(is_work & (hours >= 14) & (hours <= 17), 1.1, 0)
+    t_aux1 = t_nord - 2.1 # Sous-chauffe
+    t_aux2 = t_nord + 3.0 # Surchauffe
+    t_aux3 = t_nord + 0.2
+    
+    heating_on = (dates.weekday < 5) & (hours >= 5.5) & (hours < 18.5)
+    t_dep = np.where(heating_on, 58 - 1.2 * t_ext + np.random.normal(0, 0.8, n), 20 + np.random.normal(0, 0.3, n))
+    t_ret = np.where(heating_on, t_dep - (9.5 + np.random.normal(0, 0.8, n)), t_dep - 0.5)
+    
+    chaufferie_str = [f"{round(d, 1)} - {round(r, 1)}" for d, r in zip(t_dep, t_ret)]
+    
+    df_raw = pd.DataFrame({
+        'Horodatage': dates,
+        'Extérieur': np.round(t_ext, 1),
+        'Nord': np.round(t_nord, 1),
+        'Sud': np.round(t_sud, 1),
+        'Est': np.round(t_est, 1),
+        'Ouest': np.round(t_ouest, 1),
+        'Aux1': np.round(t_aux1, 1),
+        'Aux2': np.round(t_aux2, 1),
+        'Aux3': np.round(t_aux3, 1),
+        'Départ - Retour Chaufferie': chaufferie_str
+    })
 
-st.sidebar.subheader("2. Paramètres Métier")
-seuil_co2 = st.sidebar.slider("Seuil Détection Occupation (CO₂ ppm)", 450, 900, 600, 25)
-seuil_temp_confort = st.sidebar.slider("Seuil Déclenchement Chauffage (°C)", 17.5, 20.0, 18.5, 0.5)
-inertie_minutes = st.sidebar.slider("Inertie du bâtiment (Minutes pour chauffer)", 15, 120, 45, 15)
-jours_ouvres_an = st.sidebar.number_input("Jours de chauffe / an", 100, 250, 210)
+# Nettoyage et parsing
+df = df_raw.copy()
+
+# 1. Identification colonne Horodatage
+col_date = [c for c in df.columns if 'date' in c.lower() or 'horo' in c.lower()][0]
+df[col_date] = pd.to_datetime(df[col_date])
+df['Jour_Semaine'] = df[col_date].dt.weekday
+df['Heure_Dec'] = df[col_date].dt.hour + df[col_date].dt.minute / 60.0
+is_occ = (df['Jour_Semaine'] < 5) & (df['Heure_Dec'] >= 8.0) & (df['Heure_Dec'] < 18.0)
+
+# 2. Parsing de la colonne Départ - Retour Chaufferie
+col_chaufferie = [c for c in df.columns if 'chaufferie' in c.lower() or 'départ' in c.lower() or 'retour' in c.lower()][0]
+
+def parse_chaufferie(series):
+    cleaned = series.astype(str).str.replace(',', '.')
+    split_df = cleaned.str.split('-', expand=True)
+    dep = pd.to_numeric(split_df[0].str.strip(), errors='coerce')
+    ret = pd.to_numeric(split_df[1].str.strip(), errors='coerce')
+    return dep, ret
+
+df['T_Depart'], df['T_Retour'] = parse_chaufferie(df[col_chaufferie])
+df['Delta_T_Chaufferie'] = df['T_Depart'] - df['T_Retour']
 
 # ==============================================================================
-# 5. CONTENU PRINCIPAL & CALCULS
+# 2. DIAGNOSTIC ET CALCULS CHIFFRES
 # ==============================================================================
-st.title("🔥 Optimisation GTB : Chauffage vs. Occupation Réelle")
-st.markdown("Croisement automatique des données de **Température** et de **CO₂** pour éliminer le sur-préchauffage à vide.")
 
-df_res = analyser_chauffage_vs_presence(
-    df_co2, df_temp, zones_list, seuil_co2, seuil_temp_confort, inertie_minutes
-)
+# A. CHAUFFERIE
+heating_active = df['T_Depart'] > 30.0
+pct_temps_chauffe = heating_active.mean() * 100
+df_heat = df[heating_active]
 
-if df_res.empty:
-    st.error("Aucune donnée disponible ou seuils inadaptés pour détecter les déclenchements.")
-    st.stop()
+t_dep_moy = df_heat['T_Depart'].mean()
+t_ret_moy = df_heat['T_Retour'].mean()
+delta_t_moy = df_heat['Delta_T_Chaufferie'].mean()
+corr_loi_eau = df_heat['T_Depart'].corr(df_heat['Extérieur'])
 
-# --- TABULATION ---
-tab1, tab2 = st.tabs(["📊 Diagnostic GTB & Plan d'Action", "📈 Courbes Température & CO₂"])
+# B. ZONES D'AMBIANCE
+zones_list = ['Nord', 'Sud', 'Est', 'Ouest', 'Aux1', 'Aux2', 'Aux3']
+zones_presentes = [z for z in zones_list if z in df.columns]
 
-with tab1:
-    # --- KPIS ---
-    gachis_total_jour = df_res['Gachis_H'].sum()
-    heures_an_economisables = gachis_total_jour * jours_ouvres_an
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Gaspillage Quotidien Cumulé", f"{gachis_total_jour:.2f} h/jour", delta="Heures à vide", delta_color="inverse")
-    k2.metric("Heures de Chauffe Économisables", f"{heures_an_economisables:.0f} h/an", help="Volume d'heures gagné sur la saison")
-    k3.metric("Gain Énergétique Estimé", f"~{min(30, int(heures_an_economisables / 10))}%", help="Réduction estimée des kWhe de préchauffage")
-
-    st.markdown("---")
-
-    # --- TABLEAU DES CONSIGNES GTB ---
-    st.subheader("📋 Planning de Programmation Cible pour la GTB")
+stats_zones = []
+for z in zones_presentes:
+    vals_occ = df.loc[is_occ, z]
+    t_moy = vals_occ.mean()
+    pct_conf = ((vals_occ >= 19.0) & (vals_occ <= 22.0)).mean() * 100
+    pct_sous = (vals_occ < 19.0).mean() * 100
+    pct_sur = (vals_occ > 22.0).mean() * 100
     
-    df_display = df_res[['Zone', 'Start Chauffage Constaté', 'Première Arrivée (CO₂)', 
-                         'Préchauffage Constaté', 'Sur-Préchauffage Inutile', 'Réglage GTB Cible']].copy()
-    
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
+    stats_zones.append({
+        'Zone': z,
+        'Temp. Moyenne (°C)': round(t_moy, 1),
+        'Confort 19-22°C (%)': round(pct_conf, 1),
+        'Sous-chauffe <19°C (%)': round(pct_sous, 1),
+        'Surchauffe >22°C (%)': round(pct_sur, 1)
+    })
 
-    # Bouton d'export CSV
-    csv_buffer = io.StringIO()
-    df_display.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-    st.download_button(
-        label="📥 Télécharger la table de programmation GTB (CSV)",
-        data=csv_buffer.getvalue(),
-        file_name="consignes_optimisees_gtb.csv",
-        mime="text/csv"
-    )
+df_stats_zones = pd.DataFrame(stats_zones)
 
-    st.markdown("---")
+# C. ASYMÉTRIE NORD / SUD (Apports solaires)
+is_aprem = is_occ & (df['Heure_Dec'] >= 12.0) & (df['Heure_Dec'] < 16.0)
+ecart_sud_nord_aprem = (df.loc[is_aprem, 'Sud'] - df.loc[is_aprem, 'Nord']).mean() if ('Sud' in df.columns and 'Nord' in df.columns) else 0
 
-    # --- GRAPHIC VISUEL ---
-    st.subheader("⏱️ Alignement Temporel : Actuel (Ligne) vs Optimal (Étoile)")
-    
-    fig = go.Figure()
-    for idx, row in df_res.iterrows():
-        fig.add_trace(go.Scatter(
-            x=[row['Heat_Dec'], row['Occ_Dec']],
-            y=[row['Zone'], row['Zone']],
-            mode='lines+markers',
-            name=f"Actuel : {row['Zone']}",
-            line=dict(color='crimson', width=5),
-            marker=dict(size=9, symbol=['circle', 'square'])
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=[row['Rec_Dec']],
-            y=[row['Zone']],
-            mode='markers',
-            name=f"Cible : {row['Zone']}",
-            marker=dict(color='mediumseagreen', size=15, symbol='star')
-        ))
+# ==============================================================================
+# 3. AFFICHAGE DES RÉSULTATS DANS STREAMLIT
+# ==============================================================================
 
-    fig.update_layout(
-        xaxis=dict(
-            title="Heure de la journée",
-            tickmode='array',
-            tickvals=[4, 5, 6, 7, 8, 9, 10, 11, 12],
-            ticktext=['04h', '05h', '06h', '07h', '08h', '09h', '10h', '11h', '12h']
-        ),
-        yaxis=dict(autorange="reversed"),
-        height=380,
-        showlegend=False,
-        margin=dict(l=20, r=20, t=20, b=20)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+st.subheader("🔥 1. Bilan du Circuit Chaufferie")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Temps d'Activité Chaufferie", f"{pct_temps_chauffe:.1f}%", help="% du temps où T_Départ > 30°C")
+c2.metric("Régime Moy. (Départ / Retour)", f"{t_dep_moy:.1f}°C / {t_ret_moy:.1f}°C")
+c3.metric("ΔT Moyen Chaufferie", f"{delta_t_moy:.1f}°C", delta="Nominal (8-15°C)" if 8 <= delta_t_moy <= 15 else "Avertissement")
+c4.metric("Corrélation Loi d'Eau", f"{corr_loi_eau:.2f}", help="Doit être proche de -1.0")
 
-with tab2:
-    st.subheader("🔍 Inspection détaillée d'une zone")
-    selected_zone = st.selectbox("Sélectionner une salle / zone :", zones_list)
-    
-    df_co2['Horodatage'] = pd.to_datetime(df_co2['Horodatage'])
-    df_temp['Horodatage'] = pd.to_datetime(df_temp['Horodatage'])
+# Analyse Qualitative Chaufferie
+b1, b2 = st.columns(2)
+with b1:
+    st.markdown("### 👍 Ce qui est BIEN (Chaufferie)")
+    if corr_loi_eau < -0.75:
+        st.write(f"✔️ **Loi d'eau efficace** : Corrélation de **{corr_loi_eau:.2f}** avec l'extérieur. La production réagit bien aux baisses de température extérieure.")
+    if 8 <= delta_t_moy <= 15:
+        st.write(f"✔️ **Écart de température nominal** : ΔT moyen de **{delta_t_moy:.1f}°C**. Bon échange thermique au niveau des émetteurs.")
 
-    fig_detail = go.Figure()
-    
-    # Courbe Température
-    fig_detail.add_trace(go.Scatter(
-        x=df_temp['Horodatage'], y=df_temp[selected_zone],
-        name="Température (°C)", line=dict(color='firebrick', width=2)
-    ))
-    
-    # Courbe CO2 (Axe secondaire)
-    fig_detail.add_trace(go.Scatter(
-        x=df_co2['Horodatage'], y=df_co2[selected_zone],
-        name="CO₂ (ppm)", line=dict(color='royalblue', width=1.5, dash='dot'),
-        yaxis="y2"
-    ))
+with b2:
+    st.markdown("### ⚠️ Ce qui est MOINS BIEN (Chaufferie)")
+    if delta_t_moy < 6.0:
+        st.write(f"❌ **ΔT Faible ({delta_t_moy:.1f}°C)** : Sur-débit ou court-circuit hydraulique. L'eau revient trop chaude à la chaufferie.")
+    elif delta_t_moy > 16.0:
+        st.write(f"❌ **ΔT Élevé ({delta_t_moy:.1f}°C)** : Sous-débit probable. Risque de zones froides en bout de réseau.")
+    if corr_loi_eau > -0.60:
+        st.write(f"❌ **Mauvaise régulation loi d'eau** (r = **{corr_loi_eau:.2f}**). La régulation ne suit pas les besoins climatiques.")
 
-    fig_detail.update_layout(
-        title=f"Évolution de la Température et du CO₂ - {selected_zone}",
-        xaxis=dict(title="Date / Heure"),
-        yaxis=dict(title="Température (°C)", side="left"),
-        yaxis2=dict(title="CO₂ (ppm)", side="right", overlaying="y"),
-        height=450,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    
-    st.plotly_chart(fig_detail, use_container_width=True)
+st.markdown("---")
+
+st.subheader("🏢 2. Bilan du Confort par Zone (Période d'Occupation)")
+st.dataframe(df_stats_zones, use_container_width=True, hide_index=True)
+
+# Synthèse Qualitative Ambiances
+col_bien, col_moins = st.columns(2)
+
+zones_bonnes = df_stats_zones[df_stats_zones['Confort 19-22°C (%)'] >= 85.0]['Zone'].tolist()
+zones_sous = df_stats_zones[df_stats_zones['Sous-chauffe <19°C (%)'] > 20.0]
+zones_sur = df_stats_zones[df_stats_zones['Surchauffe >22°C (%)'] > 20.0]
+
+with col_bien:
+    st.markdown("### 👍 Ce qui est BIEN (Ambiances)")
+    if zones_bonnes:
+        st.write(f"✔️ **Zones conformes (>85% de confort)** : **{', '.join(zones_bonnes)}** maintenues dans la plage de 19°C à 22°C.")
+    st.write(f"✔️ **Stabilité thermique** : Homogénéité observée sur les zones principales.")
+
+with col_moins:
+    st.markdown("### ⚠️ Ce qui est MOINS BIEN (Ambiances)")
+    if not zones_sous.empty:
+        for _, r in zones_sous.iterrows():
+            st.write(f"❌ **Sous-chauffe sur {r['Zone']}** : **{r['Sous-chauffe <19°C (%)']}%** du temps sous 19°C (Moyenne : **{r['Temp. Moyenne (°C)']}°C**). Inconfort majeur.")
+    if not zones_sur.empty:
+        for _, r in zones_sur.iterrows():
+            st.write(f"❌ **Surchauffe sur {r['Zone']}** : **{r['Surchauffe >22°C (%)']}%** du temps au-dessus de 22°C (Moyenne : **{r['Temp. Moyenne (°C)']}°C**). Surconsommation estimée : **+{round((r['Temp. Moyenne (°C)']-19)*7, 1)}%** d'énergie.")
+    if ecart_sud_nord_aprem > 1.5:
+        st.write(f"❌ **Asymétrie Sud/Nord** : Le Sud est plus chaud de **+{ecart_sud_nord_aprem:.1f}°C** l'après-midi en raison des apports solaires non régulés.")
+
+# Graphique Températures Temporelles
+st.markdown("---")
+st.subheader("📈 Graphique Temporel des Zones et de la Chaufferie")
+fig = go.Figure()
+
+for z in zones_presentes:
+    fig.add_trace(go.Scatter(x=df[col_date], y=df[z], name=f"Zone {z}", mode='lines'))
+
+fig.add_trace(go.Scatter(x=df[col_date], y=df['Extérieur'], name="Extérieur", line=dict(color='black', dash='dash')))
+fig.add_trace(go.Scatter(x=df[col_date], y=df['T_Depart'], name="Départ Chaufferie", line=dict(color='red', width=2)))
+fig.add_trace(go.Scatter(x=df[col_date], y=df['T_Retour'], name="Retour Chaufferie", line=dict(color='orange', width=2)))
+
+fig.update_layout(height=500, xaxis_title="Date / Heure", yaxis_title="Température (°C)", hovermode="x unified")
+st.plotly_chart(fig, use_container_width=True)
