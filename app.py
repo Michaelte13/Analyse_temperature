@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 import io
 
 st.set_page_config(page_title="Étape 1 - Analyse Températures", page_icon="🌡️", layout="wide")
@@ -18,7 +17,6 @@ uploaded_file = st.sidebar.file_uploader("Fichier Excel (.xlsx) ou CSV (4 onglet
 @st.cache_data
 def load_first_sheet(file):
     if file.name.endswith('.xlsx'):
-        # Charge le premier onglet par son index 0
         df = pd.read_excel(file, sheet_name=0)
     else:
         df = pd.read_csv(file)
@@ -28,7 +26,6 @@ if uploaded_file is not None:
     df_raw = load_first_sheet(uploaded_file)
 else:
     st.info("💡 Aucun fichier importé. Génération automatique de données d'exemple pour démonstration.")
-    # Génération de données de test
     dates = pd.date_range("2026-03-01 00:00", "2026-03-07 23:45", freq="15min")
     n = len(dates)
     hours = dates.hour + dates.minute / 60.0
@@ -39,8 +36,8 @@ else:
     t_sud = t_nord + np.where(is_work & (hours >= 11) & (hours <= 16), 2.2 + np.random.normal(0, 0.4, n), 0)
     t_est = t_nord + np.where(is_work & (hours >= 8) & (hours <= 12), 1.2, 0)
     t_ouest = t_nord + np.where(is_work & (hours >= 14) & (hours <= 17), 1.1, 0)
-    t_aux1 = t_nord - 2.1 # Sous-chauffe
-    t_aux2 = t_nord + 3.0 # Surchauffe
+    t_aux1 = t_nord - 2.1
+    t_aux2 = t_nord + 3.0
     t_aux3 = t_nord + 0.2
     
     heating_on = (dates.weekday < 5) & (hours >= 5.5) & (hours < 18.5)
@@ -65,9 +62,13 @@ else:
 # Nettoyage et parsing
 df = df_raw.copy()
 
-# 1. Identification colonne Horodatage
-col_date = [c for c in df.columns if 'date' in c.lower() or 'horo' in c.lower()][0]
-df[col_date] = pd.to_datetime(df[col_date])
+# 1. Identification colonne Horodatage sécurisée
+col_date = [c for c in df.columns if 'date' in c.lower() or 'horo' in c.lower() or 'temps' in c.lower()][0]
+
+# --- CORRECTION DE LA DATE ---
+df[col_date] = pd.to_datetime(df[col_date], errors='coerce', dayfirst=True, format='mixed')
+df = df.dropna(subset=[col_date]).copy()
+
 df['Jour_Semaine'] = df[col_date].dt.weekday
 df['Heure_Dec'] = df[col_date].dt.hour + df[col_date].dt.minute / 60.0
 is_occ = (df['Jour_Semaine'] < 5) & (df['Heure_Dec'] >= 8.0) & (df['Heure_Dec'] < 18.0)
@@ -94,10 +95,10 @@ heating_active = df['T_Depart'] > 30.0
 pct_temps_chauffe = heating_active.mean() * 100
 df_heat = df[heating_active]
 
-t_dep_moy = df_heat['T_Depart'].mean()
-t_ret_moy = df_heat['T_Retour'].mean()
-delta_t_moy = df_heat['Delta_T_Chaufferie'].mean()
-corr_loi_eau = df_heat['T_Depart'].corr(df_heat['Extérieur'])
+t_dep_moy = df_heat['T_Depart'].mean() if not df_heat.empty else 0.0
+t_ret_moy = df_heat['T_Retour'].mean() if not df_heat.empty else 0.0
+delta_t_moy = df_heat['Delta_T_Chaufferie'].mean() if not df_heat.empty else 0.0
+corr_loi_eau = df_heat['T_Depart'].corr(df_heat['Extérieur']) if not df_heat.empty else 0.0
 
 # B. ZONES D'AMBIANCE
 zones_list = ['Nord', 'Sud', 'Est', 'Ouest', 'Aux1', 'Aux2', 'Aux3']
@@ -123,7 +124,7 @@ df_stats_zones = pd.DataFrame(stats_zones)
 
 # C. ASYMÉTRIE NORD / SUD (Apports solaires)
 is_aprem = is_occ & (df['Heure_Dec'] >= 12.0) & (df['Heure_Dec'] < 16.0)
-ecart_sud_nord_aprem = (df.loc[is_aprem, 'Sud'] - df.loc[is_aprem, 'Nord']).mean() if ('Sud' in df.columns and 'Nord' in df.columns) else 0
+ecart_sud_nord_aprem = (df.loc[is_aprem, 'Sud'] - df.loc[is_aprem, 'Nord']).mean() if ('Sud' in df.columns and 'Nord' in df.columns) else 0.0
 
 # ==============================================================================
 # 3. AFFICHAGE DES RÉSULTATS DANS STREAMLIT
@@ -170,7 +171,7 @@ with col_bien:
     st.markdown("### 👍 Ce qui est BIEN (Ambiances)")
     if zones_bonnes:
         st.write(f"✔️ **Zones conformes (>85% de confort)** : **{', '.join(zones_bonnes)}** maintenues dans la plage de 19°C à 22°C.")
-    st.write(f"✔️ **Stabilité thermique** : Homogénéité observée sur les zones principales.")
+    st.write("✔️ **Stabilité thermique** : Homogénéité observée sur les zones principales.")
 
 with col_moins:
     st.markdown("### ⚠️ Ce qui est MOINS BIEN (Ambiances)")
