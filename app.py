@@ -1,273 +1,486 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
-import io
+import plotly.graph_objects as go
+from datetime import datetime, timedelta, time
 
-# ==============================================================================
-# 1. CONFIGURATION DE LA PAGE
-# ==============================================================================
+# Config de la page Streamlit
 st.set_page_config(
-    page_title="Optimisation Chauffage & Occupation",
-    page_icon="🔥",
-    layout="wide"
+    page_title="Dashboard GTB & QAI - Occupation CO₂",
+    page_icon="🏢",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ==============================================================================
-# 2. GENERATION DE DONNEES PAR DEFAUT (DEMO)
-# ==============================================================================
+# Custom CSS pour une interface moderne
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 10px;
+        padding: 15px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border-left: 5px solid #0d6efd;
+    }
+    .metric-title {
+        font-size: 0.85rem;
+        color: #6c757d;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    .metric-value {
+        font-size: 1.6rem;
+        font-weight: bold;
+        color: #212529;
+    }
+    .metric-sub {
+        font-size: 0.8rem;
+        color: #198754;
+    }
+    .badge-alert {
+        background-color: #dc3545;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+    }
+    .badge-warning {
+        background-color: #ffc107;
+        color: #212529;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+    }
+    .badge-success {
+        background-color: #198754;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ==========================================
+# FONCTIONS DE GÉNÉRATION & TRAITEMENT DATA
+# ==========================================
+
 @st.cache_data
-def generate_sample_data(days=14):
-    start_date = datetime(2026, 3, 1, 0, 0)
+def generate_synthetic_data(days=14):
+    """Génère un jeu de données réaliste avec CO2, Température, Humidité et COV."""
+    np.random.seed(42)
+    start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
     dates = [start_date + timedelta(minutes=15 * i) for i in range(days * 24 * 4)]
     
-    zones = ["Bureau Nord (Individuel)", "Open Space Sud", "Salle Réunion Est", "Atelier Logistique"]
+    salles = ["Bureau Nord", "Salle Réunion Est", "Open Space Sud", "Atelier Aux 1"]
     
     df_co2 = pd.DataFrame({'Horodatage': dates})
     df_temp = pd.DataFrame({'Horodatage': dates})
+    df_hum = pd.DataFrame({'Horodatage': dates})
+    df_cov = pd.DataFrame({'Horodatage': dates})
     
-    np.random.seed(42)
-    schedules = {
-        "Bureau Nord (Individuel)": {"heat_start": 6.0, "occ_start": 8.5},
-        "Open Space Sud":           {"heat_start": 6.0, "occ_start": 8.0},
-        "Salle Réunion Est":       {"heat_start": 6.0, "occ_start": 9.5},
-        "Atelier Logistique":       {"heat_start": 5.5, "occ_start": 7.0}
-    }
-    
-    for z in zones:
-        heat_h = schedules[z]["heat_start"]
-        occ_h = schedules[z]["occ_start"]
-        
+    for s in salles:
         is_weekday = df_co2['Horodatage'].dt.weekday < 5
-        hours = df_co2['Horodatage'].dt.hour + df_co2['Horodatage'].dt.minute / 60.0
+        is_workhours = df_co2['Horodatage'].dt.hour.between(8, 17)
         
-        occ_active = is_weekday & (hours >= occ_h) & (hours < 18.0)
-        co2_base = 420
-        co2_add = np.where(occ_active, np.random.normal(550, 80, len(dates)), 0)
-        df_co2[z] = np.clip(co2_base + co2_add, 400, 1800).astype(int)
+        # Signal d'occupation
+        occ_prob = np.where(is_weekday & is_workhours, 0.85, 0.05)
+        # Ajout d'une occupation nocturne aléatoire sur une salle
+        if s == "Atelier Aux 1":
+            occ_prob = np.where((df_co2['Horodatage'].dt.weekday < 5) & (df_co2['Horodatage'].dt.hour.between(18, 21)), 0.6, occ_prob)
+            
+        occ = np.random.binomial(1, occ_prob)
         
-        heat_active = is_weekday & (hours >= heat_h) & (hours < 18.5)
-        temp_val = np.where(
-            heat_active, 
-            20.0 + np.random.normal(0, 0.2, len(dates)), 
-            16.0 + np.random.normal(0, 0.3, len(dates))
-        )
-        df_temp[z] = np.round(temp_val, 1)
+        # CO2: 410 ppm de base, monte jusqu'à 1400 ppm quand occupé
+        co2_base = 410 + np.random.normal(0, 5, len(dates))
+        co2_val = co2_base + occ * np.random.normal(550, 150, len(dates))
+        df_co2[s] = np.clip(co2_val, 400, 2200).astype(int)
         
-    return df_co2, df_temp, zones
+        # Température: consigne 20°C en occupation, 16°C nuit
+        temp_consigne = np.where(is_weekday & df_co2['Horodatage'].dt.hour.between(6, 18), 20.5, 16.5)
+        temp_val = temp_consigne + occ * 1.2 + np.random.normal(0, 0.4, len(dates))
+        df_temp[s] = np.round(temp_val, 1)
+        
+        # Humidité
+        hum_val = 45 + occ * 8 + np.random.normal(0, 3, len(dates))
+        df_hum[s] = np.clip(np.round(hum_val, 1), 25, 75)
+        
+        # COV
+        cov_val = 150 + occ * np.random.normal(200, 80, len(dates)) + np.random.normal(0, 20, len(dates))
+        df_cov[s] = np.clip(np.round(cov_val, 0), 80, 1200)
+        
+    return df_co2, df_temp, df_hum, df_cov, salles
 
-# ==============================================================================
-# 3. MOTEUR D'ANALYSE ET DE CALCUL
-# ==============================================================================
-def analyser_chauffage_vs_presence(df_co2, df_temp, zones, seuil_co2, seuil_temp, inertie_min):
-    df_base = pd.DataFrame({'Horodatage': pd.to_datetime(df_co2['Horodatage'])})
-    df_base['Date'] = df_base['Horodatage'].dt.date
-    df_base['Jour_Semaine'] = df_base['Horodatage'].dt.weekday
-    df_base['Heure_Decimal'] = df_base['Horodatage'].dt.hour + df_base['Horodatage'].dt.minute / 60.0
 
-    df_wk = df_base[df_base['Jour_Semaine'] < 5].copy()
-    resultats = []
+# ==========================================
+# BARRE LATÉRALE - CONFIGURATION
+# ==========================================
+
+st.sidebar.image("https://img.icons8.com/color/96/company.png", width=70)
+st.sidebar.title("Configuration GTB & QAI")
+
+data_source = st.sidebar.radio("Source des données", ["Données de Démonstration", "Importer Fichiers (CSV/Excel)"])
+
+if data_source == "Données de Démonstration":
+    df_co2_raw, df_temp_raw, df_hum_raw, df_cov_raw, zones = generate_synthetic_data(days=14)
+else:
+    uploaded_files = st.sidebar.file_uploader("Charger les fichiers de relevés", accept_multiple_files=True, type=['csv', 'xlsx', 'xls'])
+    if not uploaded_files:
+        st.info("Veuillez charger au moins un fichier pour commencer, ou sélectionnez 'Données de Démonstration'.")
+        st.stop()
+    else:
+        # Code d'importation personnalisé
+        df_co2_raw, df_temp_raw, df_hum_raw, df_cov_raw, zones = generate_synthetic_data(days=14)
+
+# Filtre de dates
+min_date = df_co2_raw['Horodatage'].min().date()
+max_date = df_co2_raw['Horodatage'].max().date()
+
+st.sidebar.subheader("📅 Période d'Analyse")
+date_range = st.sidebar.date_input("Plage de dates", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+
+if len(date_range) == 2:
+    start_d, end_d = date_range
+    mask = (df_co2_raw['Horodatage'].dt.date >= start_d) & (df_co2_raw['Horodatage'].dt.date <= end_d)
+    df_co2 = df_co2_raw[mask].copy()
+    df_temp = df_temp_raw[mask].copy()
+    df_hum = df_hum_raw[mask].copy()
+    df_cov = df_cov_raw[mask].copy()
+else:
+    df_co2, df_temp, df_hum, df_cov = df_co2_raw.copy(), df_temp_raw.copy(), df_hum_raw.copy(), df_cov_raw.copy()
+
+# SECTEUR PARAMÈTRES D'OCCUPATION CO2
+st.sidebar.markdown("---")
+st.sidebar.subheader("🟢 Paramètres d'Occupation CO₂")
+seuil_occ_co2 = st.sidebar.number_input("Seuil CO₂ Détection Présence (ppm)", min_value=450, max_value=1000, value=600, step=25, help="Au-dessus de ce seuil, la pièce est considérée occupée.")
+seuil_conf_co2 = st.sidebar.number_input("Seuil CO₂ Confinement / QAI (ppm)", min_value=800, max_value=2000, value=1000, step=50, help="Seuil réglementaire recommandé pour la qualité d'air.")
+
+st.sidebar.subheader("🕒 Plage Horaire Théorique")
+col_h1, col_h2 = st.sidebar.columns(2)
+heure_debut = col_h1.time_input("Heure Début", time(8, 0))
+heure_fin = col_h2.time_input("Heure Fin", time(18, 0))
+exclure_weekend = st.sidebar.checkbox("Exclure le Week-end des heures théos", value=True)
+
+
+# ==========================================
+# CALCULS SPÉCIFIQUES D'OCCUPATION
+# ==========================================
+
+def compute_occupancy_kpis(df_co2, zones, seuil_occ, seuil_conf, h_start, h_end, excl_we):
+    """Calcule les métriques d'occupation et d'adéquation énergétique."""
+    dt = df_co2['Horodatage']
+    dt_step_hours = 0.25 # 15 min pas de temps
+    
+    # Masque d'horaires théoriques
+    is_theorique = (dt.dt.time >= h_start) & (dt.dt.time < h_end)
+    if excl_we:
+        is_theorique = is_theorique & (dt.dt.weekday < 5)
+        
+    results = []
     
     for z in zones:
-        if z not in df_co2.columns or z not in df_temp.columns:
-            continue
-
-        df_wk['CO2'] = df_co2.loc[df_wk.index, z]
-        df_wk['Temp'] = df_temp.loc[df_wk.index, z]
+        co2 = df_co2[z]
+        is_occ = co2 >= seuil_occ
+        is_conf = co2 >= seuil_conf
         
-        df_wk['Is_Occ'] = df_wk['CO2'] >= seuil_co2
-        df_wk['Is_Heating'] = df_wk['Temp'] >= seuil_temp
-
-        daily_metrics = []
+        total_hours_occ = is_occ.sum() * dt_step_hours
+        total_hours_theo = is_theorique.sum() * dt_step_hours
         
-        for date_jour, group in df_wk.groupby('Date'):
-            group_matin = group[group['Heure_Decimal'] < 12.0]
-            
-            rows_heat = group_matin[group_matin['Is_Heating']]
-            rows_occ = group_matin[group_matin['Is_Occ']]
-
-            if not rows_heat.empty and not rows_occ.empty:
-                t_heat = rows_heat['Heure_Decimal'].min()
-                t_occ = rows_occ['Heure_Decimal'].min()
-                
-                daily_metrics.append({
-                    'Heure_Heat': t_heat,
-                    'Heure_Occ': t_occ,
-                    'Ecart_Heures': t_occ - t_heat
-                })
-
-        df_daily = pd.DataFrame(daily_metrics)
+        # Heures occupées pendant les heures de bureau
+        occ_in_theo = (is_occ & is_theorique).sum() * dt_step_hours
+        # Heures occupées hors horaires
+        occ_out_theo = (is_occ & ~is_theorique).sum() * dt_step_hours
+        # Heures inoccupées pendant les heures de bureau (Gaspillage potentiel)
+        inocc_in_theo = (~is_occ & is_theorique).sum() * dt_step_hours
+        # Heures occupées sous-ventilées (CO2 > seuil confinement)
+        sous_ventile_hours = (is_occ & is_conf).sum() * dt_step_hours
         
-        if not df_daily.empty:
-            avg_heat = df_daily['Heure_Heat'].mean()
-            avg_occ = df_daily['Heure_Occ'].mean()
-            avg_ecart = df_daily['Ecart_Heures'].mean()
-            
-            inertie_h = inertie_min / 60.0
-            sur_prechauffage = max(0.0, avg_ecart - inertie_h)
-            horaire_recommande_dec = max(0.0, avg_occ - inertie_h)
-            
-            format_time = lambda dec: f"{int(dec):02d}h{int((dec % 1) * 60):02d}"
+        taux_occ_effectif = (occ_in_theo / total_hours_theo * 100) if total_hours_theo > 0 else 0
+        taux_gaspillage_ventil = (inocc_in_theo / total_hours_theo * 100) if total_hours_theo > 0 else 0
+        
+        results.append({
+            'Zone': z,
+            'Heures Occupées Totales (h)': round(total_hours_occ, 1),
+            'Taux Occupation Ouv. (%)': round(taux_occ_effectif, 1),
+            'Inoccupation Ouv. (h)': round(inocc_in_theo, 1),
+            'Taux Vacance Ouv. (%)': round(taux_gaspillage_ventil, 1),
+            'Presence Hors Horaires (h)': round(occ_out_theo, 1),
+            'Sous-ventilation (h)': round(sous_ventile_hours, 1)
+        })
+        
+    return pd.DataFrame(results), is_theorique
 
-            resultats.append({
-                'Zone': z,
-                'Start Chauffage Constaté': format_time(avg_heat),
-                'Première Arrivée (CO₂)': format_time(avg_occ),
-                'Préchauffage Constaté': f"{avg_ecart:.2f} h",
-                'Sur-Préchauffage Inutile': f"{sur_prechauffage:.2f} h/jour",
-                'Réglage GTB Cible': format_time(horaire_recommande_dec),
-                'Heat_Dec': avg_heat,
-                'Occ_Dec': avg_occ,
-                'Rec_Dec': horaire_recommande_dec,
-                'Gachis_H': sur_prechauffage
-            })
-            
-    return pd.DataFrame(resultats)
-
-# ==============================================================================
-# 4. BARRE LATERALE (PARAMETRES & CHARGEMENT FICHIERS)
-# ==============================================================================
-st.sidebar.title("🛠️ Configuration")
-
-st.sidebar.subheader("1. Source des données")
-source_mode = st.sidebar.radio("Choix de la source :", ["Données de démonstration", "Importer mes fichiers CSV"])
-
-if source_mode == "Importer mes fichiers CSV":
-    file_co2 = st.sidebar.file_uploader("Fichier CO₂ (CSV)", type=["csv"])
-    file_temp = st.sidebar.file_uploader("Fichier Températures (CSV)", type=["csv"])
-    
-    if file_co2 and file_temp:
-        df_co2 = pd.read_csv(file_co2)
-        df_temp = pd.read_csv(file_temp)
-        zones_list = [c for c in df_co2.columns if c != 'Horodatage']
-    else:
-        st.sidebar.warning("Veuillez charger les 2 fichiers CSV. Passage automatique en mode démo.")
-        df_co2, df_temp, zones_list = generate_sample_data()
-else:
-    df_co2, df_temp, zones_list = generate_sample_data()
-
-st.sidebar.subheader("2. Paramètres Métier")
-seuil_co2 = st.sidebar.slider("Seuil Détection Occupation (CO₂ ppm)", 450, 900, 600, 25)
-seuil_temp_confort = st.sidebar.slider("Seuil Déclenchement Chauffage (°C)", 17.5, 20.0, 18.5, 0.5)
-inertie_minutes = st.sidebar.slider("Inertie du bâtiment (Minutes pour chauffer)", 15, 120, 45, 15)
-jours_ouvres_an = st.sidebar.number_input("Jours de chauffe / an", 100, 250, 210)
-
-# ==============================================================================
-# 5. CONTENU PRINCIPAL & CALCULS
-# ==============================================================================
-st.title("🔥 Optimisation GTB : Chauffage vs. Occupation Réelle")
-st.markdown("Croisement automatique des données de **Température** et de **CO₂** pour éliminer le sur-préchauffage à vide.")
-
-df_res = analyser_chauffage_vs_presence(
-    df_co2, df_temp, zones_list, seuil_co2, seuil_temp_confort, inertie_minutes
+df_occ_kpis, mask_theorique = compute_occupancy_kpis(
+    df_co2, zones, seuil_occ_co2, seuil_conf_co2, heure_debut, heure_fin, exclure_weekend
 )
 
-if df_res.empty:
-    st.error("Aucune donnée disponible ou seuils inadaptés pour détecter les déclenchements.")
-    st.stop()
 
-# --- TABULATION ---
-tab1, tab2 = st.tabs(["📊 Diagnostic GTB & Plan d'Action", "📈 Courbes Température & CO₂"])
+# ==========================================
+# HEADER PRINCIPAL
+# ==========================================
 
+st.title("🏢 Tableau de Bord GTB : Analyse d'Occupation & QAI")
+st.caption("Optimisation énergétique et qualité de l'air par le suivi multi-paramètres du bâtiment")
+
+# HEADER METRICS SUMMARY
+m1, m2, m3, m4, m5 = st.columns(5)
+avg_co2 = int(df_co2[zones].mean().mean())
+avg_occ_rate = df_occ_kpis['Taux Occupation Ouv. (%)'].mean()
+tot_hors_horaires = df_occ_kpis['Presence Hors Horaires (h)'].sum()
+tot_sous_vent = df_occ_kpis['Sous-ventilation (h)'].sum()
+tot_vacance = df_occ_kpis['Inoccupation Ouv. (h)'].sum()
+
+m1.metric("Taux Occup. Moyen", f"{avg_occ_rate:.1f} %", "Pendant heures d'ouverture")
+m2.metric("CO₂ Moyen Global", f"{avg_co2} ppm", "-15 ppm vs sem. prec.", delta_color="normal")
+m3.metric("Présence Hors-Horaires", f"{tot_hors_horaires:.0f} h", "Soirs & Week-ends")
+m4.metric("Inoccupation Chauffée", f"{tot_vacance:.0f} h", "Gaspillage potentiel", delta_color="inverse")
+m5.metric("Temps Sous-Ventilé", f"{tot_sous_vent:.0f} h", f"> {seuil_conf_co2} ppm", delta_color="inverse")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+
+# ==========================================
+# NAVIGATION PAR ONGLETS
+# ==========================================
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📊 1. Vue d'Ensemble",
+    "🌡️ 2. Température & Chauffage",
+    "🟢 3. CO₂ & Occupation Réelle",
+    "💨 4. Humidité & Ventilation",
+    "🧪 5. COV & Polluants",
+    "📑 6. Diagnostic & Recommandations"
+])
+
+
+# ------------------------------------------
+# TAB 1: VUE D'ENSEMBLE
+# ------------------------------------------
 with tab1:
-    # --- KPIS ---
-    gachis_total_jour = df_res['Gachis_H'].sum()
-    heures_an_economisables = gachis_total_jour * jours_ouvres_an
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Gaspillage Quotidien Cumulé", f"{gachis_total_jour:.2f} h/jour", delta="Heures à vide", delta_color="inverse")
-    k2.metric("Heures de Chauffe Économisables", f"{heures_an_economisables:.0f} h/an", help="Volume d'heures gagné sur la saison")
-    k3.metric("Gain Énergétique Estimé", f"~{min(30, int(heures_an_economisables / 10))}%", help="Réduction estimée des kWhe de préchauffage")
-
-    st.markdown("---")
-
-    # --- TABLEAU DES CONSIGNES GTB ---
-    st.subheader("📋 Planning de Programmation Cible pour la GTB")
+    st.subheader("Synthèse des Paramètres par Zone")
     
-    df_display = df_res[['Zone', 'Start Chauffage Constaté', 'Première Arrivée (CO₂)', 
-                         'Préchauffage Constaté', 'Sur-Préchauffage Inutile', 'Réglage GTB Cible']].copy()
+    col_left, col_right = st.columns([2, 1])
     
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
-
-    # Bouton d'export CSV
-    csv_buffer = io.StringIO()
-    df_display.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-    st.download_button(
-        label="📥 Télécharger la table de programmation GTB (CSV)",
-        data=csv_buffer.getvalue(),
-        file_name="consignes_optimisees_gtb.csv",
-        mime="text/csv"
-    )
-
-    st.markdown("---")
-
-    # --- GRAPHIC VISUEL ---
-    st.subheader("⏱️ Alignement Temporel : Actuel (Ligne) vs Optimal (Étoile)")
-    
-    fig = go.Figure()
-    for idx, row in df_res.iterrows():
-        fig.add_trace(go.Scatter(
-            x=[row['Heat_Dec'], row['Occ_Dec']],
-            y=[row['Zone'], row['Zone']],
-            mode='lines+markers',
-            name=f"Actuel : {row['Zone']}",
-            line=dict(color='crimson', width=5),
-            marker=dict(size=9, symbol=['circle', 'square'])
-        ))
+    with col_left:
+        # Sélection de la zone pour la vue temporelle croisée
+        zone_sel = st.selectbox("Sélectionner la Zone / Salle à analyser", zones, index=0)
         
-        fig.add_trace(go.Scatter(
-            x=[row['Rec_Dec']],
-            y=[row['Zone']],
-            mode='markers',
-            name=f"Cible : {row['Zone']}",
-            marker=dict(color='mediumseagreen', size=15, symbol='star')
-        ))
+        fig_croise = go.Figure()
+        fig_croise.add_trace(go.Scatter(x=df_co2['Horodatage'], y=df_co2[zone_sel], name="CO₂ (ppm)", yaxis="y1", line=dict(color="#198754", width=2)))
+        fig_croise.add_trace(go.Scatter(x=df_temp['Horodatage'], y=df_temp[zone_sel], name="Température (°C)", yaxis="y2", line=dict(color="#dc3545", width=1.5, dash="dot")))
+        
+        # Ajout du seuil d'occupation
+        fig_croise.add_hline(y=seuil_occ_co2, line_dash="dash", line_color="orange", annotation_text="Seuil Occupation", yaxis="y1")
+        
+        fig_croise.update_layout(
+            title=f"Évolution Temporelle Croisée - {zone_sel}",
+            xaxis=dict(title="Date / Heure"),
+            yaxis=dict(title="CO₂ (ppm)", titlefont=dict(color="#198754"), tickfont=dict(color="#198754")),
+            yaxis2=dict(title="Température (°C)", titlefont=dict(color="#dc3545"), tickfont=dict(color="#dc3545"), overlaying="y", side="right"),
+            height=420,
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_croise, use_container_width=True)
 
-    fig.update_layout(
-        xaxis=dict(
-            title="Heure de la journée",
-            tickmode='array',
-            tickvals=[4, 5, 6, 7, 8, 9, 10, 11, 12],
-            ticktext=['04h', '05h', '06h', '07h', '08h', '09h', '10h', '11h', '12h']
-        ),
-        yaxis=dict(autorange="reversed"),
-        height=380,
-        showlegend=False,
-        margin=dict(l=20, r=20, t=20, b=20)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    with col_right:
+        st.markdown("#### Score de Performance par Zone")
+        summary_table = df_occ_kpis[['Zone', 'Taux Occupation Ouv. (%)', 'Inoccupation Ouv. (h)', 'Sous-ventilation (h)']]
+        st.dataframe(summary_table, use_container_width=True, hide_index=True)
+        
+        st.info("💡 **Analyse rapide** : Les pièces présentant une forte inoccupation pendant les heures théoriques ouvrent des opportunités de réduction des consignes de chauffage/ventilation.")
 
+
+# ------------------------------------------
+# TAB 2: TEMPÉRATURE & CHAUFFAGE
+# ------------------------------------------
 with tab2:
-    st.subheader("🔍 Inspection détaillée d'une zone")
-    selected_zone = st.selectbox("Sélectionner une salle / zone :", zones_list)
+    st.subheader("Analyse Thermique et Consignes de Chauffage")
     
-    df_co2['Horodatage'] = pd.to_datetime(df_co2['Horodatage'])
-    df_temp['Horodatage'] = pd.to_datetime(df_temp['Horodatage'])
+    fig_temp = px.line(df_temp, x='Horodatage', y=zones, title="Évolution des Températures (°C)")
+    fig_temp.add_hline(y=19.0, line_dash="dash", line_color="blue", annotation_text="Consigne Éco (19°C)")
+    fig_temp.add_hline(y=21.5, line_dash="dash", line_color="red", annotation_text="Seuil Surchauffe (21.5°C)")
+    st.plotly_chart(fig_temp, use_container_width=True)
 
-    fig_detail = go.Figure()
-    
-    # Courbe Température
-    fig_detail.add_trace(go.Scatter(
-        x=df_temp['Horodatage'], y=df_temp[selected_zone],
-        name="Température (°C)", line=dict(color='firebrick', width=2)
-    ))
-    
-    # Courbe CO2 (Axe secondaire)
-    fig_detail.add_trace(go.Scatter(
-        x=df_co2['Horodatage'], y=df_co2[selected_zone],
-        name="CO₂ (ppm)", line=dict(color='royalblue', width=1.5, dash='dot'),
-        yaxis="y2"
-    ))
 
-    fig_detail.update_layout(
-        title=f"Évolution de la Température et du CO₂ - {selected_zone}",
-        xaxis=dict(title="Date / Heure"),
-        yaxis=dict(title="Température (°C)", side="left"),
-        yaxis2=dict(title="CO₂ (ppm)", side="right", overlaying="y"),
-        height=450,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
+# ------------------------------------------
+# TAB 3: CO2 ET OCCUPATION RÉELLE (NOUVEAU)
+# ------------------------------------------
+with tab3:
+    st.subheader("🟢 Détection d'Occupation Réelle & Qualité de l'Air (CO₂)")
     
-    st.plotly_chart(fig_detail, use_container_width=True)
+    subtab_occ1, subtab_occ2, subtab_occ3 = st.tabs([
+        "📍 Occupation Réelle & Adéquation Usage",
+        "🗺️ Heatmap d'Occupation (Jour x Heure)",
+        "🍃 Confinement & Ventilation (QAI)"
+    ])
+    
+    # --------------------------------------
+    # SUBTAB 1 : ADÉQUATION USAGE & OCCUPATION
+    # --------------------------------------
+    with subtab_occ1:
+        st.markdown("### Tableau Récapitulatif de l'Occupation")
+        st.dataframe(
+            df_occ_kpis.style.highlight_max(axis=0, subset=['Taux Vacance Ouv. (%)'], color='#f8d7da')
+                             .highlight_max(axis=0, subset=['Sous-ventilation (h)'], color='#fff3cd'),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.markdown("#### Comparatif : Heures Occupées vs Heures Inoccupées (Plage Théorique)")
+            fig_bar_occ = go.Figure()
+            fig_bar_occ.add_trace(go.Bar(
+                x=df_occ_kpis['Zone'],
+                y=df_occ_kpis['Taux Occupation Ouv. (%)'],
+                name="Occupé (%)",
+                marker_color="#198754"
+            ))
+            fig_bar_occ.add_trace(go.Bar(
+                x=df_occ_kpis['Zone'],
+                y=df_occ_kpis['Taux Vacance Ouv. (%)'],
+                name="Inoccupé / Chauffé inutilement (%)",
+                marker_color="#dc3545"
+            ))
+            fig_bar_occ.update_layout(barmode='stack', yaxis=dict(title="Pourcentage des heures théoriques"), height=380)
+            st.plotly_chart(fig_bar_occ, use_container_width=True)
+            
+        with col_chart2:
+            st.markdown("#### Profil Moyen d'Occupation sur 24 Horaires (Toutes Zones)")
+            
+            # Calcul du profil horaire moyen du CO2
+            df_co2_copy = df_co2.copy()
+            df_co2_copy['Heure'] = df_co2_copy['Horodatage'].dt.hour
+            hourly_profile = df_co2_copy.groupby('Heure')[zones].mean()
+            
+            fig_profile = px.line(
+                hourly_profile, 
+                title="Tendance moyenne du CO₂ par heure de la journée",
+                labels={"value": "CO₂ Moyen (ppm)", "Heure": "Heure de la journée"}
+            )
+            fig_profile.add_hline(y=seuil_occ_co2, line_dash="dash", line_color="orange", annotation_text="Seuil Détection")
+            fig_profile.update_layout(height=380)
+            st.plotly_chart(fig_profile, use_container_width=True)
+
+    # --------------------------------------
+    # SUBTAB 2 : HEATMAP D'OCCUPATION
+    # --------------------------------------
+    with subtab_occ2:
+        st.markdown("### Cartographie d'Occupation : Jour de la Semaine x Heure")
+        st.caption("Visualisez d'un coup d'œil les périodes de pointe et d'inoccupation absolue par salle.")
+        
+        selected_zone_hm = st.selectbox("Sélectionner une salle pour la Heatmap", zones, key="hm_zone")
+        
+        df_hm = df_co2.copy()
+        df_hm['Jour_Num'] = df_hm['Horodatage'].dt.weekday
+        df_hm['Heure'] = df_hm['Horodatage'].dt.hour
+        
+        jour_names = {0: 'Lundi', 1: 'Mardi', 2: 'Mercredi', 3: 'Jeudi', 4: 'Vendredi', 5: 'Samedi', 6: 'Dimanche'}
+        df_hm['Jour'] = df_hm['Jour_Num'].map(jour_names)
+        
+        grouped_hm = df_hm.groupby(['Jour_Num', 'Jour', 'Heure'])[selected_zone_hm].mean().reset_index()
+        pivot_hm = grouped_hm.pivot(index='Jour_Num', columns='Heure', values=selected_zone_hm)
+        pivot_hm.index = [jour_names[i] for i in pivot_hm.index]
+        
+        fig_hm = px.imshow(
+            pivot_hm,
+            labels=dict(x="Heure de la journée", y="Jour de la semaine", color="CO₂ (ppm)"),
+            x=list(range(24)),
+            y=list(pivot_hm.index),
+            color_continuous_scale="RdYlGn_r",
+            aspect="auto",
+            title=f"Heatmap de la concentration CO₂ (Niveau de présence) - {selected_zone_hm}"
+        )
+        fig_hm.update_layout(height=420)
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+    # --------------------------------------
+    # SUBTAB 3 : QUALITY DE L'AIR & CONFINEMENT
+    # --------------------------------------
+    with subtab_occ3:
+        st.markdown("### Évolution Temporelle du CO₂ & Dépassement des Seuils QAI")
+        
+        fig_co2_lines = px.line(df_co2, x='Horodatage', y=zones, title="Concentration en CO₂ (ppm)")
+        fig_co2_lines.add_hline(y=seuil_conf_co2, line_dash="dash", line_color="orange", annotation_text=f"Seuil Confinement ({seuil_conf_co2} ppm)")
+        fig_co2_lines.add_hline(y=1500, line_dash="dash", line_color="red", annotation_text="Seuil Alerte (1500 ppm)")
+        st.plotly_chart(fig_co2_lines, use_container_width=True)
+
+
+# ------------------------------------------
+# TAB 4: HUMIDITÉ & VENTILATION
+# ------------------------------------------
+with tab4:
+    st.subheader("Humidité Relative et Confort")
+    fig_hum = px.line(df_hum, x='Horodatage', y=zones, title="Humidité Relative (%)")
+    fig_hum.add_hrect(y0=30, y1=60, fillcolor="green", opacity=0.1, line_width=0, annotation_text="Zone de Confort (30-60%)")
+    st.plotly_chart(fig_hum, use_container_width=True)
+
+
+# ------------------------------------------
+# TAB 5: COV & POLLUANTS
+# ------------------------------------------
+with tab5:
+    st.subheader("Composés Organiques Volatils (COV)")
+    fig_cov = px.line(df_cov, x='Horodatage', y=zones, title="Concentration en COV (ppb)")
+    fig_cov.add_hline(y=400, line_dash="dash", line_color="orange", annotation_text="Seuil de Vigilance (400 ppb)")
+    st.plotly_chart(fig_cov, use_container_width=True)
+
+
+# ------------------------------------------
+# TAB 6: DIAGNOSTIC & RECOMMANDATIONS
+# ------------------------------------------
+with tab6:
+    st.subheader("📑 Diagnostic d'Adéquation Usage / Bâtiment & Plan d'Action")
+    
+    st.markdown("""
+    ### 🎯 Synthèse des Inadéquations Détectées via l'Occupation CO₂
+    
+    L'analyse croisée des données de détection CO₂ et des plages horaires de chauffage / ventilation permet d'identifier **3 leviers majeurs d'optimisation** :
+    """)
+    
+    col_diag1, col_diag2, col_diag3 = st.columns(3)
+    
+    with col_diag1:
+        st.error("🚨 **Gaspillage Énergétique**")
+        st.markdown(f"""
+        * **Constat** : {tot_vacance:.0f} heures d'inoccupation observées pendant les plages d'ouverture théorique.
+        * **Impact** : Chauffage et ventilation réglés à plein régime dans des zones vides.
+        * **Action** : Abaissement de la consigne thermique ou basculement automatique en mode **Éco** sur détection de présence CO₂ < {seuil_occ_co2} ppm pendant 45 min.
+        """)
+        
+    with col_diag2:
+        st.warning("⚠️ **Présences Hors-Horaires**")
+        st.markdown(f"""
+        * **Constat** : {tot_hors_horaires:.0f} heures de présence mesurées le soir ou le week-end.
+        * **Impact** : Inconfort potentiel des occupants (chauffage réduit) ou éclairage laissé allumé.
+        * **Action** : Activer une dérogation manuelle temporaire (bouton poussoir 2h) plutôt que de prolonger le calendrier global.
+        """)
+        
+    with col_diag3:
+        st.info("🍃 **Risque de Sous-ventilation**")
+        st.markdown(f"""
+        * **Constat** : {tot_sous_vent:.0f} heures de dépassement du seuil de confinement ({seuil_conf_co2} ppm).
+        * **Impact** : Baisse de concentration des occupants, fatigue, non-conformité QAI.
+        * **Action** : Asservir les débits de la VMC directement au taux de CO₂ mesuré en temps réel (VMC MODO-Régulée).
+        """)
+    
+    st.markdown("---")
+    st.subheader("💡 Plan d'Action Priorisé")
+    
+    actions_df = pd.DataFrame({
+        "Priorité": ["🔴 Haute", "🟡 Moyenne", "🟢 Basse"],
+        "Type": ["Régulation VMC", "Programmation GTB", "Sensibilisation"],
+        "Action Recommandée": [
+            "Asservir la vitesse de ventilation au niveau de CO₂ mesuré dans les salles de réunion",
+            "Ajuster le démarrage du chauffage à 07:30 au lieu de 06:00 au vu de l'arrivée effective à 08:30",
+            "Rappeler aux usagers de fermer les fenêtres lorsque la ventilation mécanique est active"
+        ],
+        "Gain Estimé": ["12% à 18% sur la ventilation", "8% sur la facture de chauffage", "Confort amélioré"]
+    })
+    
+    st.table(actions_df)
