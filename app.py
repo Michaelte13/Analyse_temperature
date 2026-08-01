@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Application Streamlit d'Audit Énergétique & QAI
-Analyse Automatisée de la Courbe de Chauffe (Loi d'Eau) & Confort
+Analyse Automatisée de la Courbe de Chauffe (Loi d'Eau) avec colonnes Départs et Retours
 """
 
 from datetime import datetime, timedelta
@@ -26,13 +26,13 @@ st.set_page_config(
 
 
 def process_custom_dataframe(df):
-    """Nettoie et formate un DataFrame issu d'un feuillet Excel."""
+    """Nettoie et formate un DataFrame issu d'un feuillet Excel avec détection auto des colonnes."""
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # Identification de la colonne Date/Horodatage
+    # 1. Identification de la colonne Date/Horodatage
     date_cols = [
         c
         for c in df.columns
@@ -51,11 +51,61 @@ def process_custom_dataframe(df):
     )
     df = df.dropna(subset=["Horodatage"]).sort_values("Horodatage")
 
-    # Traitement des valeurs numériques et des virgules françaises
-    for col in list(df.columns):
-        if col != "Horodatage":
+    # 2. Renommage intelligent des colonnes clés
+    col_mapping = {}
+    for col in df.columns:
+        col_lower = str(col).lower().strip()
+
+        # Température extérieure
+        if col_lower in [
+            "ext.",
+            "ext",
+            "t_ext",
+            "temp_ext",
+            "t ext",
+            "temp ext",
+            "température ext",
+        ]:
+            col_mapping[col] = "T_ext"
+
+        # Température de départ chauffage
+        elif any(
+            k in col_lower
+            for k in [
+                "eau départ",
+                "eau depart",
+                "t_depart",
+                "temp_depart",
+                "départ",
+                "depart",
+                "v3v_depart",
+                "t_départ",
+                "température départ",
+            ]
+        ):
+            col_mapping[col] = "V3V_Depart"
+
+        # Température de retour chauffage
+        elif any(
+            k in col_lower
+            for k in [
+                "température retour",
+                "temperature retour",
+                "t_retour",
+                "temp_retour",
+                "retour",
+                "eau retour",
+                "t retour",
+            ]
+        ):
+            col_mapping[col] = "T_Retour"
+
+    df = df.rename(columns=col_mapping)
+
+    # Rétrocompatibilité : gestion d'une ancienne colonne combinée "Eau" ("45,2 - 37,1")
+    if "V3V_Depart" not in df.columns:
+        for col in df.columns:
             if str(col).lower().strip() == "eau":
-                # Extraction du départ et retour si format "45,2 - 37,1"
                 if df[col].dtype == object or str(df[col].dtype) == "string":
                     split_eau = df[col].astype(str).str.split("-", expand=True)
                     if split_eau.shape[1] >= 2:
@@ -67,26 +117,20 @@ def process_custom_dataframe(df):
                             split_eau[1].str.replace(",", ".").str.strip(),
                             errors="coerce",
                         )
-            else:
-                if df[col].dtype == object or str(df[col].dtype) == "string":
-                    clean_series = (
-                        df[col]
-                        .astype(str)
-                        .str.replace(",", ".")
-                        .str.strip()
-                    )
-                    df[col] = pd.to_numeric(clean_series, errors="coerce")
-                else:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Renommage explicite de la température extérieure
-    col_mapping = {}
+    # 3. Conversion numérique de toutes les colonnes de mesures (virgules FR)
     for col in df.columns:
-        col_lower = str(col).lower().strip()
-        if col_lower in ["ext.", "ext", "t_ext", "temp_ext"]:
-            col_mapping[col] = "T_ext"
-
-    df = df.rename(columns=col_mapping)
+        if col != "Horodatage":
+            if df[col].dtype == object or str(df[col].dtype) == "string":
+                clean_series = (
+                    df[col]
+                    .astype(str)
+                    .str.replace(",", ".")
+                    .str.strip()
+                )
+                df[col] = pd.to_numeric(clean_series, errors="coerce")
+            else:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
     cols_a_garder = ["Horodatage"] + [
         c
@@ -131,7 +175,7 @@ def load_data(uploaded_file):
 
 @st.cache_data
 def generate_synthetic_data():
-    """Génère des données de démo intégrant une chaufferie avec régulation."""
+    """Génère des données de démo avec colonnes Eau départ et Température retour séparées."""
     start_date = datetime(2026, 3, 11, 16, 45)
     dates = [
         start_date + timedelta(minutes=15 * i) for i in range(15 * 24 * 4)
@@ -153,7 +197,7 @@ def generate_synthetic_data():
         ) + np.random.normal(0, 0.2, len(df_t))
         df_t[s] = [f"{v:.1f}".replace(".", ",") for v in v_t]
 
-    # Génération d'une loi d'eau réelle (Pente ~ 1.2)
+    # Génération séparée du Départ et du Retour Chauffage
     t_dep = np.where(
         t_ext_vals < 16,
         45 - 1.2 * (t_ext_vals - 5) + np.random.normal(0, 0.6, len(df_t)),
@@ -165,10 +209,8 @@ def generate_synthetic_data():
         20.0,
     )
 
-    df_t["Eau"] = [
-        f"{d:.1f}".replace(".", ",") + " - " + f"{r:.1f}".replace(".", ",")
-        for d, r in zip(t_dep, t_ret)
-    ]
+    df_t["Eau départ"] = [f"{d:.1f}".replace(".", ",") for d in t_dep]
+    df_t["Température retour"] = [f"{r:.1f}".replace(".", ",") for r in t_ret]
 
     # Humidité, CO2, COV
     df_h = pd.DataFrame({"Date FR": dates})
@@ -283,7 +325,7 @@ seuil_cov = st.sidebar.number_input("Seuil COV (ppb)", value=200)
 
 
 # -----------------------------------------------------------------------------
-# 3. EXTRACTION ET CALCULS DE LA COURBE DE CHAUFFE
+# 3. EXTRACTION ET CALCULS
 # -----------------------------------------------------------------------------
 
 df_temp = data_dict.get("Température", pd.DataFrame())
@@ -309,7 +351,7 @@ salles_cov = get_room_cols(df_cov)
 # 4. DASHBOARD PRINCIPAL
 # -----------------------------------------------------------------------------
 
-st.title("🔥 Tableau de Bord - Audit Chaufferie & Loi d'Eau")
+st.title("🔥 Audit Énergétique — Analyse Courbe de Chauffe & QAI")
 
 tab_t, tab_h, tab_c, tab_v = st.tabs(
     [
@@ -321,10 +363,10 @@ tab_t, tab_h, tab_c, tab_v = st.tabs(
 )
 
 # =============================================================================
-# ONGLET 1 : TEMPÉRATURE ET ANALYSE DÉTAILLÉE DE LA COURBE DE CHAUFFE
+# ONGLET 1 : TEMPÉRATURE ET ANALYSE DE LA COURBE DE CHAUFFE
 # =============================================================================
 with tab_t:
-    st.subheader("🔥 Analyse Complète de la Courbe de Chauffe (Loi d'Eau)")
+    st.subheader("🔥 Analyse Automatisée de la Courbe de Chauffe (Loi d'Eau)")
 
     has_ext = "T_ext" in df_temp.columns
     has_dep = "V3V_Depart" in df_temp.columns
@@ -338,13 +380,12 @@ with tab_t:
         x_vals = df_chauffe["T_ext"].values
         y_vals = df_chauffe["V3V_Depart"].values
 
-        # Ne prendre que la période de chauffage actif (ex: T_dep > 22°C)
         mask_actif = y_vals > 22.0
         if mask_actif.sum() > 5:
             x_fit = x_vals[mask_actif]
             y_fit = y_vals[mask_actif]
             pente_reelle, intercept = np.polyfit(x_fit, y_fit, 1)
-            # R2
+
             correlation_matrix = np.corrcoef(x_fit, y_fit)
             r_squared = (
                 correlation_matrix[0, 1] ** 2
@@ -357,13 +398,11 @@ with tab_t:
         pente_abs = abs(pente_reelle)
 
         # Calcul des anomalies
-        # 1. Chauffage inutile quand T_ext > T_coupure
         inutile_mask = (df_temp["T_ext"] > t_coupure_chauffage) & (
             df_temp["V3V_Depart"] > 25.0
         )
         nb_heures_inutiles = (inutile_mask.sum() * 15) / 60.0
 
-        # 2. Delta T moyen (Départ - Retour)
         delta_t_moyen = None
         if has_ret:
             df_temp["Delta_T"] = df_temp["V3V_Depart"] - df_temp["T_Retour"]
@@ -372,13 +411,13 @@ with tab_t:
             ].mean()
 
         # KPIs Chaufferie
-        st.markdown("#### 📊 Indicateurs de Performance de la Chaufferie")
+        st.markdown("#### 📊 Indicateurs de Performance Chaufferie")
         kc1, kc2, kc3, kc4 = st.columns(4)
 
         kc1.metric(
             "Pente Réelle Observée",
             f"{pente_abs:.2f}",
-            delta=f"Cible théorique: {pente_theorique:.1f}",
+            delta=f"Pente visée: {pente_theorique:.1f}",
             delta_color="normal"
             if abs(pente_abs - pente_theorique) < 0.2
             else "inverse",
@@ -387,51 +426,63 @@ with tab_t:
         kc2.metric(
             "Qualité Régulation (R²)",
             f"{r_squared:.2f}",
-            delta="Bonne (R² > 0.7)" if r_squared > 0.7 else "Instable",
+            delta="Stabilité OK" if r_squared > 0.7 else "Instable / Dispersé",
             delta_color="normal" if r_squared > 0.7 else "inverse",
         )
 
         kc3.metric(
             "Delta T° Moy. (Départ - Retour)",
             f"{delta_t_moyen:.1f} °C" if delta_t_moyen is not None else "N/A",
-            delta="Irrigation OK (5-10°C)"
+            delta="Échange optimal (5-10°C)"
             if (delta_t_moyen and 4 <= delta_t_moyen <= 12)
-            else "Vérifier débit",
+            else "Débit à vérifier",
         )
 
         kc4.metric(
-            "Chauffage Inutile (> " + str(t_coupure_chauffage) + "°C ext)",
+            "Chauffage Hors Saison (> " + str(t_coupure_chauffage) + "°C ext)",
             f"{nb_heures_inutiles:.1f} heures",
             delta="Aucun gaspillage"
             if nb_heures_inutiles == 0
-            else "Surchauffe hors saison",
+            else "Risque de surchauffe",
             delta_color="normal" if nb_heures_inutiles == 0 else "inverse",
         )
 
         st.divider()
 
-        # GRAPHIQUE LOI D'EAU AUTOMATISÉ
+        # GRAPHIQUE LOI D'EAU
         col_g1, col_g2 = st.columns([1.6, 1])
 
         with col_g1:
-            st.markdown("#### 📈 Courbe de Chauffe / Loi d'Eau ($T_{ext}$ vs $T_{départ}$)")
+            st.markdown(
+                "#### 📈 Nuage de Points & Régression ($T_{ext}$ vs $T_{départ}$)"
+            )
 
             fig_loi = go.Figure()
 
-            # Nuage de points réels
+            # Nuage de points
             fig_loi.add_trace(
                 go.Scatter(
                     x=df_chauffe["T_ext"],
                     y=df_chauffe["V3V_Depart"],
                     mode="markers",
-                    name="Mesures Réelles",
-                    marker=dict(
-                        color="#3498db", opacity=0.5, size=6
-                    ),
+                    name="Mesures Eau Départ",
+                    marker=dict(color="#3498db", opacity=0.5, size=6),
                 )
             )
 
-            # Ligne de régression réelle
+            # Optionnel : Ajout du nuage de points de Retour Chauffage si disponible
+            if has_ret:
+                fig_loi.add_trace(
+                    go.Scatter(
+                        x=df_chauffe["T_ext"],
+                        y=df_chauffe["T_Retour"],
+                        mode="markers",
+                        name="Mesures Eau Retour",
+                        marker=dict(color="#9b59b6", opacity=0.3, size=5),
+                    )
+                )
+
+            # Ligne de régression
             x_line = np.linspace(
                 df_chauffe["T_ext"].min(), df_chauffe["T_ext"].max(), 50
             )
@@ -441,24 +492,23 @@ with tab_t:
                     x=x_line,
                     y=y_line,
                     mode="lines",
-                    name=f"Régression Observée (Pente = {pente_abs:.2f})",
+                    name=f"Loi d'eau Réelle (Pente = {pente_abs:.2f})",
                     line=dict(color="#e74c3c", width=3),
                 )
             )
 
-            # Ligne théorique indicative
+            # Ligne théorique
             y_theo = 20 + pente_theorique * (20 - x_line)
             fig_loi.add_trace(
                 go.Scatter(
                     x=x_line,
                     y=y_theo,
                     mode="lines",
-                    name=f"Loi d'Eau Théorique (Pente = {pente_theorique})",
+                    name=f"Loi d'eau Théorique ({pente_theorique})",
                     line=dict(color="#2ecc71", dash="dash", width=2),
                 )
             )
 
-            # Seuil de coupure
             fig_loi.add_vline(
                 x=t_coupure_chauffage,
                 line_dash="dot",
@@ -468,7 +518,7 @@ with tab_t:
 
             fig_loi.update_layout(
                 xaxis_title="Température Extérieure (°C)",
-                yaxis_title="Température Départ Chauffage (°C)",
+                yaxis_title="Température Eau (°C)",
                 height=420,
                 legend=dict(
                     orientation="h",
@@ -481,61 +531,68 @@ with tab_t:
             st.plotly_chart(fig_loi, use_container_width=True)
 
         with col_g2:
-            st.markdown("#### 🔍 Diagnostic Automatisé de la Chaufferie")
+            st.markdown("#### 🔍 Diagnostic Régulation")
 
-            # Moteur de règles d'analyse automatisé
             diagnostics = []
-
             if r_squared < 0.5:
                 diagnostics.append(
-                    "⚠️ **Régulation Instable** : La dispersion des points indique que la vanne 3 voies (V3V) régule mal ou subit des perturbations manuelles / horaires incohérentes."
+                    "⚠️ **Dispersion Élevée** : La régulation manque de stabilité. Vérifier si la vanne 3 voies oscille ou est manipulée manuellement."
                 )
 
             if pente_abs > pente_theorique + 0.3:
                 diagnostics.append(
-                    f"🔴 **Loi d'Eau Trop Forte (Pente {pente_abs:.2f})** : La chaufferie envoie une eau trop chaude par grand froid, entraînant des risques de surchauffe et de gaspillage."
+                    f"🔴 **Pente Réelle Élevée ({pente_abs:.2f})** : L'eau est trop chaude par grand froid. Risque de gaspillage énergétique."
                 )
             elif pente_abs < pente_theorique - 0.3:
                 diagnostics.append(
-                    f"🔵 **Loi d'Eau Trop Faible (Pente {pente_abs:.2f})** : Risque d'inconfort et de sous-chauffe en période hivernale rigoureuse."
+                    f"🔵 **Pente Réelle Faible ({pente_abs:.2f})** : Risque d'inconfort dans les locaux par basse température extérieure."
                 )
             else:
                 diagnostics.append(
-                    "✅ **Pente Optimale** : La pente observée est parfaitement cohérente avec la pente théorique."
+                    "✅ **Pente Optimale** : La pente calculée concorde avec la consigne théorique."
                 )
 
             if nb_heures_inutiles > 0:
                 diagnostics.append(
-                    f"🔥 **Absence de Coupure Estivale** : {nb_heures_inutiles:.1f}h de chauffage ont été enregistrées au-dessus de {t_coupure_chauffage}°C extérieurs. Ajuster la température de basculement été/hiver sur l'automate."
+                    f"🔥 **Consigne de Coupure à Réglée** : {nb_heures_inutiles:.1f}h d'envoi d'eau chaude au-delà de {t_coupure_chauffage}°C extérieurs."
                 )
 
             if delta_t_moyen and delta_t_moyen < 4.0:
                 diagnostics.append(
-                    "⚠️ **Delta T° trop faible (< 4°C)** : Débit circulateur trop élevé ou surdimensionné (eau revient sans échanger sa chaleur)."
+                    "⚠️ **Delta T° Faible (< 4°C)** : Le circulateur tourne probablement trop vite (vitesse trop élevée)."
                 )
 
             for diag in diagnostics:
                 st.info(diag)
 
-        # Graphique des Températures de Zones & Ambiance
         st.markdown("---")
-        st.markdown("#### 🏢 Températures Ambiantes dans les Zones")
+        st.markdown("#### 🏢 Évolution Chronologique des Températures")
 
         fig_salles = px.line(
             df_temp,
             x="Horodatage",
             y=salles_temp,
-            title="Évolution des Températures Intérieures",
+            title="Températures d'Ambiance par Zone",
         )
-        if "T_ext" in df_temp.columns:
+        if "V3V_Depart" in df_temp.columns:
             fig_salles.add_trace(
                 go.Scatter(
                     x=df_temp["Horodatage"],
-                    y=df_temp["T_ext"],
-                    name="T° Extérieure",
-                    line=dict(color="gray", dash="dash"),
+                    y=df_temp["V3V_Depart"],
+                    name="T° Départ Eau",
+                    line=dict(color="#e74c3c", width=1.5),
                 )
             )
+        if "T_Retour" in df_temp.columns:
+            fig_salles.add_trace(
+                go.Scatter(
+                    x=df_temp["Horodatage"],
+                    y=df_temp["T_Retour"],
+                    name="T° Retour Eau",
+                    line=dict(color="#9b59b6", width=1.5),
+                )
+            )
+
         fig_salles.add_hline(
             y=t_min_confort,
             line_dash="dash",
@@ -552,7 +609,7 @@ with tab_t:
 
     else:
         st.warning(
-            "⚠️ Les colonnes de chaufferie ('T_ext' et 'Eau' ou 'V3V_Depart') sont nécessaires dans l'onglet 'Température' pour générer l'analyse de la courbe de chauffe."
+            "⚠️ Assurez-vous d'avoir une colonne pour la température extérieure ('Ext.') et le départ chauffage ('Eau départ') dans votre fichier."
         )
 
 
@@ -560,30 +617,30 @@ with tab_t:
 # ONGLET 2 : HUMIDITÉ
 # =============================================================================
 with tab_h:
-    st.subheader("Analyse de l'Humidité Relative (%)")
+    st.subheader("Humidité Relative (%)")
     if not df_hum.empty and salles_hum:
         fig_hum = px.line(
             df_hum,
             x="Horodatage",
             y=salles_hum,
-            title="Humidité Relative par Zone",
+            title="Évolution de l'Humidité par Zone",
         )
         st.plotly_chart(fig_hum, use_container_width=True)
     else:
-        st.info("Données d'humidité non disponibles.")
+        st.info("Données d'humidité indisponibles.")
 
 
 # =============================================================================
 # ONGLET 3 : CO2
 # =============================================================================
 with tab_c:
-    st.subheader("Analyse du Confinement CO2 (ppm)")
+    st.subheader("Niveaux de Confinement CO2 (ppm)")
     if not df_co2.empty and salles_co2:
         fig_co2 = px.line(
             df_co2,
             x="Horodatage",
             y=salles_co2,
-            title="Niveaux de CO2 par Zone",
+            title="Évolution du CO2 par Zone",
         )
         fig_co2.add_hline(
             y=seuil_co2,
@@ -593,20 +650,20 @@ with tab_c:
         )
         st.plotly_chart(fig_co2, use_container_width=True)
     else:
-        st.info("Données de CO2 non disponibles.")
+        st.info("Données de CO2 indisponibles.")
 
 
 # =============================================================================
 # ONGLET 4 : COV
 # =============================================================================
 with tab_v:
-    st.subheader("Analyse des COV (ppb)")
+    st.subheader("Composés Organiques Volatils COV (ppb)")
     if not df_cov.empty and salles_cov:
         fig_cov = px.line(
             df_cov,
             x="Horodatage",
             y=salles_cov,
-            title="Composés Organiques Volatils par Zone",
+            title="Évolution des COV par Zone",
         )
         fig_cov.add_hline(
             y=seuil_cov,
@@ -616,4 +673,4 @@ with tab_v:
         )
         st.plotly_chart(fig_cov, use_container_width=True)
     else:
-        st.info("Données de COV non disponibles.")
+        st.info("Données de COV indisponibles.")
