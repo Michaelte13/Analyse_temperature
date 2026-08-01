@@ -35,6 +35,7 @@ def process_custom_dataframe(df):
     df["Horodatage"] = pd.to_datetime(
         df["Horodatage"], dayfirst=True, errors="coerce"
     )
+    # Suppression stricte des lignes dont la date est invalide (NaT)
     df = df.dropna(subset=["Horodatage"]).sort_values("Horodatage")
 
     # Traitement des valeurs texte / virgules françaises
@@ -42,35 +43,31 @@ def process_custom_dataframe(df):
         if col != "Horodatage":
             if df[col].dtype == object:
                 # Traitement spécial pour la colonne Eau si elle contient "Départ - Retour" (ex: "31,5 - 31,2")
-                if str(col).lower() == "eau":
+                if str(col).lower().strip() == "eau":
                     split_eau = (
                         df[col].astype(str).str.split("-", expand=True)
                     )
                     if split_eau.shape[1] >= 2:
-                        df["V3V_Depart"] = (
-                            split_eau[0]
-                            .str.replace(",", ".")
-                            .str.strip()
-                            .astype(float)
+                        df["V3V_Depart"] = pd.to_numeric(
+                            split_eau[0].str.replace(",", ".").str.strip(),
+                            errors="coerce",
                         )
-                        df["T_Retour"] = (
-                            split_eau[1]
-                            .str.replace(",", ".")
-                            .str.strip()
-                            .astype(float)
+                        df["T_Retour"] = pd.to_numeric(
+                            split_eau[1].str.replace(",", ".").str.strip(),
+                            errors="coerce",
                         )
                 else:
-                    df[col] = (
+                    clean_series = (
                         df[col]
                         .astype(str)
                         .str.replace(",", ".")
                         .str.strip()
                     )
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                    df[col] = pd.to_numeric(clean_series, errors="coerce")
             else:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Renommage explicite des colonnes connues pour faciliter la suite
+    # Renommage explicite des colonnes connues
     col_mapping = {}
     for col in df.columns:
         col_lower = str(col).lower().strip()
@@ -149,18 +146,26 @@ else:
     st.sidebar.info("Aucun fichier importé. Utilisation des données de démo.")
     df = generate_synthetic_data()
 
-# Filtre de dates
-min_date = df["Horodatage"].min().date()
-max_date = df["Horodatage"].max().date()
+# Sécurité : vérification qu'il reste des dates valides après nettoyage
+valid_dates = df["Horodatage"].dropna()
+if valid_dates.empty:
+    st.error(
+        "❌ Aucune date valide n'a été trouvée dans le fichier. Vérifiez le format de la colonne Date."
+    )
+    st.stop()
+
+# Filtre de dates sécurisé contre NaT
+min_date = valid_dates.min().date()
+max_date = valid_dates.max().date()
 
 date_range = st.sidebar.date_input(
     "Période d'analyse",
-    [min_date, max_date],
+    value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date,
 )
 
-if len(date_range) == 2:
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_filter, end_filter = date_range
     df = df[
         (df["Horodatage"].dt.date >= start_filter)
@@ -203,7 +208,7 @@ delta_t_moyen = (
 )
 
 # -----------------------------------------------------------------------------
-# 4. DASHBOARD - DASHBOARD PRINCIPAL (ONGLETS)
+# 4. DASHBOARD PRINCIPAL (ONGLETS)
 # -----------------------------------------------------------------------------
 
 st.title("🏛️ Tableau de Bord - Audit Énergétique & QAI")
