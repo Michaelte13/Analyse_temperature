@@ -1,5 +1,4 @@
-<<<<<<< HEAD
-streamlit
 pandas
-plotly
-openpyxl
+matplotlib
+seaborn
+numpy
