@@ -45,23 +45,53 @@ if uploaded_file is not None:
             st.warning("⚠️ Veuillez sélectionner au moins un capteur intérieur dans la 3ème colonne.")
         else:
             with st.spinner("Nettoyage et analyse des données en cours..."):
-# ---------------------------------------------------------
+                # ---------------------------------------------------------
                 # 3. NETTOYAGE ET PRÉPARATION
                 # ---------------------------------------------------------
                 df_clean = pd.DataFrame()
                 
-                # On force le format exact : jour/mois/année heure:minute
-                df_clean['Date'] = pd.to_datetime(
-                    df_raw[col_date], 
-                    format='%d/%m/%Y %H:%M', 
-                    errors='coerce'
-                )
+                # 1. Gestion de la date (s'adapte automatiquement avec ou sans secondes)
+                df_clean['Date'] = pd.to_datetime(df_raw[col_date], errors='coerce', dayfirst=True)
                 
-                # On supprime les lignes où la date n'a pas pu être lue
+                # 2. FONCTION MAGIQUE : Remplace les virgules françaises par des points anglais
+                def nettoyer_nombres(colonne):
+                    # Si c'est considéré comme du texte, on remplace la virgule par un point
+                    if colonne.dtype == 'object':
+                        colonne = colonne.astype(str).str.replace(',', '.', regex=False)
+                    return pd.to_numeric(colonne, errors='coerce')
+                
+                # On applique notre fonction de nettoyage aux températures
+                df_clean['T_ext'] = nettoyer_nombres(df_raw[col_text])
+                df_clean['T_depart'] = nettoyer_nombres(df_raw[col_tdepart])
+                df_clean['T_retour'] = nettoyer_nombres(df_raw[col_tretour])
+                
+                for col in cols_int:
+                    df_clean[col] = nettoyer_nombres(df_raw[col])
+                
+                # 3. On supprime les lignes sans date
                 df_clean = df_clean.dropna(subset=['Date'])
                 
-                # On définit la date comme index
+                if df_clean.empty:
+                    st.error("🚨 Impossible de lire les dates. Les données ont été rejetées.")
+                    st.stop()
+                
+                # 4. On met la date en index
                 df_clean = df_clean.set_index('Date')
+                
+                # 5. Lissage : on force le pas à 15 minutes
+                df_clean = df_clean.resample('15min').mean()
+                
+                # On bouche les petits trous (jusqu'à 1 heure max, soit 4 x 15min)
+                df_clean = df_clean.interpolate(method='time', limit=4)
+                
+                if 'T_depart' not in df_clean.columns:
+                    st.error("🚨 Erreur lors de la création de la série temporelle.")
+                    st.stop()
+                
+                # 6. Calculs des moyennes et Delta
+                # skipna=True permet de calculer la moyenne même si (comme dans ta ligne) tu n'as que le capteur "Nord" d'allumé !
+                df_clean['T_int_moy'] = df_clean[cols_int].mean(axis=1, skipna=True)
+                df_clean['Delta_T'] = df_clean['T_depart'] - df_clean['T_retour']
 
                 # ---------------------------------------------------------
                 # 4. VISUALISATIONS
