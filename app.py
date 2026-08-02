@@ -22,23 +22,45 @@ if uploaded_file is not None:
     st.dataframe(df_raw.head())
     
     # ---------------------------------------------------------
-    # 2. ASSOCIATION DES COLONNES (Mapping)
+    # 2. DÉTECTION AUTOMATIQUE DES COLONNES
     # ---------------------------------------------------------
-    st.write("---")
-    st.write("### 2. Configuration des capteurs")
-    st.write("Associez vos colonnes Excel aux données nécessaires pour l'analyse :")
-    
     colonnes_dispo = df_raw.columns.tolist()
+    
+    # Fonction intelligente pour trouver la bonne colonne selon des mots-clés
+    def trouver_colonne(mots_cles):
+        for col in colonnes_dispo:
+            col_lower = str(col).lower()
+            for mot in mots_cles:
+                if mot in col_lower:
+                    return col
+        return colonnes_dispo[0] # Sécurité par défaut
+
+    # Devine automatiquement les colonnes principales
+    col_date_auto = trouver_colonne(['date', 'heure', 'time'])
+    col_ext_auto = trouver_colonne(['ext', 'exterieur', 'extérieur'])
+    col_depart_auto = trouver_colonne(['depart', 'départ'])
+    col_retour_auto = trouver_colonne(['retour'])
+    
+    # Devine automatiquement les capteurs intérieurs/auxiliaires (ceux qui contiennent des orientations ou 'aux')
+    mots_interieurs = ['nord', 'sud', 'est', 'ouest', 'aux', 'int', 'intérieur']
+    cols_int_auto = [col for col in colonnes_dispo if any(m in str(col).lower() for m in mots_interieurs)]
+    if not cols_int_auto:
+        # Si aucun mot-clé n'est trouvé, on prend tout le reste par défaut
+        cols_int_auto = [col for col in colonnes_dispo if col not in [col_date_auto, col_ext_auto, col_depart_auto, col_retour_auto]]
+
+    st.write("---")
+    st.write("### 2. Configuration automatique des capteurs")
+    st.info("💡 *Les colonnes ont été détectées automatiquement grâce à leurs noms. Vous pouvez les modifier ci-dessous si nécessaire.*")
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        col_date = st.selectbox("📅 Colonne Date/Heure", options=colonnes_dispo)
-        col_text = st.selectbox("🌡️ Température Extérieure", options=colonnes_dispo)
+        col_date = st.selectbox("📅 Colonne Date/Heure", options=colonnes_dispo, index=colonnes_dispo.index(col_date_auto))
+        col_text = st.selectbox("🌡️ Température Extérieure", options=colonnes_dispo, index=colonnes_dispo.index(col_ext_auto))
     with col2:
-        col_tdepart = st.selectbox("🔥 Temp. Départ Chaufferie (après V3V)", options=colonnes_dispo)
-        col_tretour = st.selectbox("❄️ Temp. Retour Chaufferie", options=colonnes_dispo)
+        col_tdepart = st.selectbox("🔥 Temp. Départ Chaufferie (après V3V)", options=colonnes_dispo, index=colonnes_dispo.index(col_depart_auto))
+        col_tretour = st.selectbox("❄️ Temp. Retour Chaufferie", options=colonnes_dispo, index=colonnes_dispo.index(col_retour_auto))
     with col3:
-        cols_int = st.multiselect("🏠 Capteurs Intérieurs (Sélectionnez-en plusieurs)", options=colonnes_dispo)
+        cols_int = st.multiselect("🏠 Capteurs Intérieurs & Auxiliaires", options=colonnes_dispo, default=cols_int_auto)
 
     # Bouton pour déclencher les calculs
     if st.button("🚀 Lancer l'analyse", type="primary"):
