@@ -3,10 +3,3 @@ streamlit
 pandas
 plotly
 openpyxl
-=======
-streamlit
-pandas
-plotly
-openpyxl
->>>>>>> c7a69a33e8518a0629c2be2af84c0543f9ccc8d8
-numpy
