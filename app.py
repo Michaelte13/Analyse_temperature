@@ -45,31 +45,23 @@ if uploaded_file is not None:
             st.warning("⚠️ Veuillez sélectionner au moins un capteur intérieur dans la 3ème colonne.")
         else:
             with st.spinner("Nettoyage et analyse des données en cours..."):
-                # ---------------------------------------------------------
+# ---------------------------------------------------------
                 # 3. NETTOYAGE ET PRÉPARATION
                 # ---------------------------------------------------------
-                # Création d'un nouveau dataframe propre
                 df_clean = pd.DataFrame()
                 
-                # Gestion de la date
-                df_clean['Date'] = pd.to_datetime(df_raw[col_date])
+                # On force le format exact : jour/mois/année heure:minute
+                df_clean['Date'] = pd.to_datetime(
+                    df_raw[col_date], 
+                    format='%d/%m/%Y %H:%M', 
+                    errors='coerce'
+                )
+                
+                # On supprime les lignes où la date n'a pas pu être lue
+                df_clean = df_clean.dropna(subset=['Date'])
+                
+                # On définit la date comme index
                 df_clean = df_clean.set_index('Date')
-                
-                # Conversion des valeurs en nombres (ignore le texte parasite)
-                df_clean['T_ext'] = pd.to_numeric(df_raw[col_text].values, errors='coerce')
-                df_clean['T_depart'] = pd.to_numeric(df_raw[col_tdepart].values, errors='coerce')
-                df_clean['T_retour'] = pd.to_numeric(df_raw[col_tretour].values, errors='coerce')
-                
-                for col in cols_int:
-                    df_clean[col] = pd.to_numeric(df_raw[col].values, errors='coerce')
-                
-                # Lissage : on force le pas à 15 minutes et on bouche les trous jusqu'à 1 heure
-                df_clean = df_clean.resample('15min').mean()
-                df_clean = df_clean.interpolate(method='time', limit=4)
-                
-                # Calculs des moyennes et Delta
-                df_clean['T_int_moy'] = df_clean[cols_int].mean(axis=1, skipna=True)
-                df_clean['Delta_T'] = df_clean['T_depart'] - df_clean['T_retour']
 
                 # ---------------------------------------------------------
                 # 4. VISUALISATIONS
